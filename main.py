@@ -13,10 +13,13 @@ logger = logging.getLogger(__name__)
 app = FastAPI()
 
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
-SUPABASE_URL = os.getenv("SUPABASE_URL", "")
+SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")  # remove barra do final se tiver
 SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
 
 client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+
+# Monta a URL base da API corretamente
+SUPABASE_API = f"{SUPABASE_URL}/rest/v1"
 
 HEADERS = {
     "apikey": SUPABASE_KEY,
@@ -37,15 +40,18 @@ def salvar_gasto(descricao, valor, categoria, forma_pagamento, telefone):
         "forma_pagamento": forma_pagamento,
         "telefone": telefone
     }
-    r = httpx.post(f"{SUPABASE_URL}/rest/v1/gastos", headers=HEADERS, json=data)
+    url = f"{SUPABASE_API}/gastos"
+    logger.info(f"Salvando em: {url}")
+    r = httpx.post(url, headers=HEADERS, json=data)
+    logger.info(f"Status: {r.status_code} — {r.text}")
     r.raise_for_status()
     resultado = r.json()
-    gasto_id = resultado[0]["id"] if resultado else "?"
-    logger.info(f"Gasto salvo: id={gasto_id} descricao={descricao} valor={valor}")
-    return gasto_id
+    return resultado[0]["id"] if resultado else "?"
 
 def buscar_gastos(telefone, periodo="mes"):
     hoje = datetime.now()
+    url = f"{SUPABASE_API}/gastos"
+
     if periodo == "hoje":
         filtro = hoje.strftime("%Y-%m-%d")
         params = {"telefone": f"eq.{telefone}", "data": f"like.{filtro}%", "order": "id.desc"}
@@ -55,54 +61,39 @@ def buscar_gastos(telefone, periodo="mes"):
         params = {"telefone": f"eq.{telefone}", "data": f"gte.{inicio}", "order": "id.desc"}
     else:
         filtro = hoje.strftime("%Y-%m")
-        params = {"telefone": f"eq.{telefone}", "data": f"like.{filtro}%", "order": "id.desc"}
+        params = {"telefone": f"eq.{telefone}", "data": f"like.{filtro}%25", "order": "id.desc"}
 
-    r = httpx.get(f"{SUPABASE_URL}/rest/v1/gastos", headers=HEADERS, params=params)
+    logger.info(f"Buscando em: {url} params={params}")
+    r = httpx.get(url, headers=HEADERS, params=params)
+    logger.info(f"Status: {r.status_code} — {r.text[:200]}")
     r.raise_for_status()
     return r.json()
 
 def remover_ultimo_gasto(telefone):
-    r = httpx.get(
-        f"{SUPABASE_URL}/rest/v1/gastos",
-        headers=HEADERS,
-        params={"telefone": f"eq.{telefone}", "order": "id.desc", "limit": "1"}
-    )
+    url = f"{SUPABASE_API}/gastos"
+    r = httpx.get(url, headers=HEADERS, params={"telefone": f"eq.{telefone}", "order": "id.desc", "limit": "1"})
     r.raise_for_status()
     gastos = r.json()
     if not gastos:
         return None
     gasto = gastos[0]
-    httpx.delete(
-        f"{SUPABASE_URL}/rest/v1/gastos",
-        headers=HEADERS,
-        params={"id": f"eq.{gasto['id']}"}
-    )
+    httpx.delete(url, headers=HEADERS, params={"id": f"eq.{gasto['id']}"})
     return gasto
 
 def remover_gasto_por_descricao(telefone, descricao):
-    r = httpx.get(
-        f"{SUPABASE_URL}/rest/v1/gastos",
-        headers=HEADERS,
-        params={"telefone": f"eq.{telefone}", "descricao": f"ilike.%{descricao}%", "order": "id.desc", "limit": "1"}
-    )
+    url = f"{SUPABASE_API}/gastos"
+    r = httpx.get(url, headers=HEADERS, params={"telefone": f"eq.{telefone}", "descricao": f"ilike.%{descricao}%", "order": "id.desc", "limit": "1"})
     r.raise_for_status()
     gastos = r.json()
     if not gastos:
         return None
     gasto = gastos[0]
-    httpx.delete(
-        f"{SUPABASE_URL}/rest/v1/gastos",
-        headers=HEADERS,
-        params={"id": f"eq.{gasto['id']}"}
-    )
+    httpx.delete(url, headers=HEADERS, params={"id": f"eq.{gasto['id']}"})
     return gasto
 
 def listar_ultimos_gastos(telefone, limite=5):
-    r = httpx.get(
-        f"{SUPABASE_URL}/rest/v1/gastos",
-        headers=HEADERS,
-        params={"telefone": f"eq.{telefone}", "order": "id.desc", "limit": str(limite)}
-    )
+    url = f"{SUPABASE_API}/gastos"
+    r = httpx.get(url, headers=HEADERS, params={"telefone": f"eq.{telefone}", "order": "id.desc", "limit": str(limite)})
     r.raise_for_status()
     return r.json()
 
@@ -267,4 +258,5 @@ async def webhook(
 
 @app.get("/")
 def health():
-    return {"status": "Mono bot rodando! 🐒"}
+    logger.info(f"SUPABASE_API configurado como: {SUPABASE_API}")
+    return {"status": "Mono bot rodando! 🐒", "supabase_api": SUPABASE_API}

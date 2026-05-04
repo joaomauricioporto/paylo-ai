@@ -100,7 +100,7 @@ def listar_ultimos_gastos(telefone, limite=5):
 # ============================================================
 # IA
 # ============================================================
-SYSTEM_PROMPT = """Você é um assistente financeiro pessoal via WhatsApp chamado Mono 🐒.
+SYSTEM_PROMPT = """Você é um assistente financeiro pessoal via WhatsApp chamado Paylo.AI 🐒.
 Responda APENAS com JSON válido, sem markdown, sem explicações.
 
 1. REGISTRAR GASTO (ex: "uber 27", "mercado 150 débito", "almoço 35 pix"):
@@ -170,7 +170,7 @@ def gerar_historico(telefone):
 # ============================================================
 # AJUDA
 # ============================================================
-MENSAGEM_AJUDA = """🐒 *Olá! Sou o Mono, seu assistente financeiro!*
+MENSAGEM_AJUDA = """🐒 *Olá! Sou o Paylo.IA, seu assistente financeiro!*
 
 *📝 Registrar gastos:*
 • "mercado 150"
@@ -259,4 +259,4 @@ async def webhook(
 @app.get("/")
 def health():
     logger.info(f"SUPABASE_API configurado como: {SUPABASE_API}")
-    return {"status": "Mono bot rodando! 🐒", "supabase_api": SUPABASE_API}
+    return {"status": "Paylo.IA rodando! 🐒", "supabase_api": SUPABASE_API}

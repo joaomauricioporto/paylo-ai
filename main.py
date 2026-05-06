@@ -63,17 +63,24 @@ def buscar_gastos(telefone, periodo="mes"):
 
 def buscar_por_forma_pagamento(telefone, forma, periodo="mes"):
     hoje = datetime.now()
-    url = f"{SUPABASE_API}/gastos"
     if periodo == "hoje":
         filtro = hoje.strftime("%Y-%m-%d")
-        params = {"telefone": f"eq.{telefone}", "forma_pagamento": f"ilike.%{forma}%", "data": f"like.{filtro}%", "order": "id.desc"}
+        filtro_data = f"like.{filtro}%25"
     elif periodo == "semana":
         inicio = (hoje - timedelta(days=7)).strftime("%Y-%m-%d")
-        params = {"telefone": f"eq.{telefone}", "forma_pagamento": f"ilike.%{forma}%", "data": f"gte.{inicio}", "order": "id.desc"}
+        filtro_data = f"gte.{inicio}"
     else:
         filtro = hoje.strftime("%Y-%m")
-        params = {"telefone": f"eq.{telefone}", "forma_pagamento": f"ilike.%{forma}%", "data": f"like.{filtro}%25", "order": "id.desc"}
-    r = httpx.get(url, headers=HEADERS, params=params)
+        filtro_data = f"like.{filtro}%25"
+
+    url = (
+        f"{SUPABASE_API}/gastos"
+        f"?telefone=eq.{telefone}"
+        f"&forma_pagamento=ilike.*{forma}*"
+        f"&data={filtro_data}"
+        f"&order=id.desc"
+    )
+    r = httpx.get(url, headers=HEADERS)
     r.raise_for_status()
     return r.json()
 

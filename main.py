@@ -3,7 +3,7 @@ from fastapi.responses import PlainTextResponse
 import anthropic
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 import httpx
 import logging
 
@@ -13,12 +13,11 @@ logger = logging.getLogger(__name__)
 app = FastAPI()
 
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
-SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")  # remove barra do final se tiver
+SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
 
 client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
-# Monta a URL base da API corretamente
 SUPABASE_API = f"{SUPABASE_URL}/rest/v1"
 
 HEADERS = {
@@ -41,9 +40,7 @@ def salvar_gasto(descricao, valor, categoria, forma_pagamento, telefone):
         "telefone": telefone
     }
     url = f"{SUPABASE_API}/gastos"
-    logger.info(f"Salvando em: {url}")
     r = httpx.post(url, headers=HEADERS, json=data)
-    logger.info(f"Status: {r.status_code} — {r.text}")
     r.raise_for_status()
     resultado = r.json()
     return resultado[0]["id"] if resultado else "?"
@@ -51,21 +48,32 @@ def salvar_gasto(descricao, valor, categoria, forma_pagamento, telefone):
 def buscar_gastos(telefone, periodo="mes"):
     hoje = datetime.now()
     url = f"{SUPABASE_API}/gastos"
-
     if periodo == "hoje":
         filtro = hoje.strftime("%Y-%m-%d")
         params = {"telefone": f"eq.{telefone}", "data": f"like.{filtro}%", "order": "id.desc"}
     elif periodo == "semana":
-        from datetime import timedelta
         inicio = (hoje - timedelta(days=7)).strftime("%Y-%m-%d")
         params = {"telefone": f"eq.{telefone}", "data": f"gte.{inicio}", "order": "id.desc"}
     else:
         filtro = hoje.strftime("%Y-%m")
         params = {"telefone": f"eq.{telefone}", "data": f"like.{filtro}%25", "order": "id.desc"}
-
-    logger.info(f"Buscando em: {url} params={params}")
     r = httpx.get(url, headers=HEADERS, params=params)
-    logger.info(f"Status: {r.status_code} — {r.text[:200]}")
+    r.raise_for_status()
+    return r.json()
+
+def buscar_por_forma_pagamento(telefone, forma, periodo="mes"):
+    hoje = datetime.now()
+    url = f"{SUPABASE_API}/gastos"
+    if periodo == "hoje":
+        filtro = hoje.strftime("%Y-%m-%d")
+        params = {"telefone": f"eq.{telefone}", "forma_pagamento": f"ilike.%{forma}%", "data": f"like.{filtro}%", "order": "id.desc"}
+    elif periodo == "semana":
+        inicio = (hoje - timedelta(days=7)).strftime("%Y-%m-%d")
+        params = {"telefone": f"eq.{telefone}", "forma_pagamento": f"ilike.%{forma}%", "data": f"gte.{inicio}", "order": "id.desc"}
+    else:
+        filtro = hoje.strftime("%Y-%m")
+        params = {"telefone": f"eq.{telefone}", "forma_pagamento": f"ilike.%{forma}%", "data": f"like.{filtro}%25", "order": "id.desc"}
+    r = httpx.get(url, headers=HEADERS, params=params)
     r.raise_for_status()
     return r.json()
 
@@ -100,7 +108,7 @@ def listar_ultimos_gastos(telefone, limite=5):
 # ============================================================
 # IA
 # ============================================================
-SYSTEM_PROMPT = """Você é um assistente financeiro pessoal via WhatsApp chamado Paylo.AI 🐒.
+SYSTEM_PROMPT = """Você é um assistente financeiro pessoal via WhatsApp chamado Paylo.IA 🐒.
 Responda APENAS com JSON válido, sem markdown, sem explicações.
 
 1. REGISTRAR GASTO (ex: "uber 27", "mercado 150 débito", "almoço 35 pix"):
@@ -111,16 +119,20 @@ Categorias: Alimentação, Transporte, Lazer, Saúde, Moradia, Educação, Vestu
 {"tipo": "relatorio", "periodo": "mes"}
 Períodos: hoje, semana, mes
 
-3. REMOVER ÚLTIMO (ex: "remover último", "apagar último", "desfazer"):
+3. RELATÓRIO POR FORMA DE PAGAMENTO (ex: "quanto gastei no cartão", "total no pix", "gastos no débito essa semana"):
+{"tipo": "relatorio_pagamento", "forma": "cartão", "periodo": "mes"}
+Formas: cartão, pix, débito, dinheiro, crédito
+
+4. REMOVER ÚLTIMO (ex: "remover último", "apagar último", "desfazer"):
 {"tipo": "remover_ultimo"}
 
-4. REMOVER ESPECÍFICO (ex: "remover uber", "apagar mercado"):
+5. REMOVER ESPECÍFICO (ex: "remover uber", "apagar mercado"):
 {"tipo": "remover_item", "descricao": "uber"}
 
-5. HISTÓRICO (ex: "últimos gastos", "o que registrei"):
+6. HISTÓRICO (ex: "últimos gastos", "o que registrei"):
 {"tipo": "historico"}
 
-6. OUTROS (ex: "oi", "ajuda"):
+7. OUTROS (ex: "oi", "ajuda"):
 {"tipo": "ajuda"}"""
 
 def interpretar_mensagem(mensagem):
@@ -138,7 +150,7 @@ def interpretar_mensagem(mensagem):
     return json.loads(texto.strip())
 
 # ============================================================
-# RELATÓRIO
+# RELATÓRIOS
 # ============================================================
 def gerar_relatorio(telefone, periodo):
     gastos = buscar_gastos(telefone, periodo)
@@ -158,13 +170,33 @@ def gerar_relatorio(telefone, periodo):
     linhas.append(f"\n💰 *Total: R$ {total:.2f}*")
     return "\n".join(linhas)
 
+def gerar_relatorio_pagamento(telefone, forma, periodo):
+    gastos = buscar_por_forma_pagamento(telefone, forma, periodo)
+    nomes_periodo = {"hoje": "hoje", "semana": "nos últimos 7 dias", "mes": "este mês"}
+
+    if not gastos:
+        return f"📭 Nenhum gasto no {forma} {nomes_periodo.get(periodo, 'neste período')}."
+
+    total = sum(g["valor"] for g in gastos)
+    por_categoria = {}
+    for g in gastos:
+        por_categoria[g["categoria"]] = por_categoria.get(g["categoria"], 0) + g["valor"]
+
+    nomes_periodo2 = {"hoje": "Hoje", "semana": "Últimos 7 dias", "mes": "Este mês"}
+    linhas = [f"💳 *{forma.capitalize()} — {nomes_periodo2.get(periodo, 'Período')}*\n"]
+    for cat, val in sorted(por_categoria.items(), key=lambda x: -x[1]):
+        linhas.append(f"  {cat}: R$ {val:.2f}")
+    linhas.append(f"\n💰 *Total no {forma}: R$ {total:.2f}*")
+    return "\n".join(linhas)
+
 def gerar_historico(telefone):
     gastos = listar_ultimos_gastos(telefone)
     if not gastos:
         return "📭 Nenhum gasto registrado ainda."
     linhas = ["🧾 *Últimos gastos:*\n"]
     for g in gastos:
-        linhas.append(f"• {g['descricao'].capitalize()} — R$ {g['valor']:.2f} ({g['categoria']})")
+        forma = g.get("forma_pagamento", "não informado")
+        linhas.append(f"• {g['descricao'].capitalize()} — R$ {g['valor']:.2f} ({g['categoria']} · {forma})")
     return "\n".join(linhas)
 
 # ============================================================
@@ -181,13 +213,17 @@ MENSAGEM_AJUDA = """🐒 *Olá! Sou o Paylo.IA, seu assistente financeiro!*
 • "resumo" ou "resumo da semana"
 • "quanto gastei hoje"
 
+*💳 Por forma de pagamento:*
+• "quanto gastei no cartão"
+• "total no pix essa semana"
+• "gastos no débito hoje"
+
 *🧾 Ver histórico:*
 • "últimos gastos"
 
 *🗑️ Remover gastos:*
 • "remover último"
 • "remover uber"
-• "apagar mercado"
 
 *💡 Escreva de forma natural, eu entendo! 😊*"""
 
@@ -226,6 +262,13 @@ async def webhook(
         elif resultado["tipo"] == "relatorio":
             resposta = gerar_relatorio(telefone, resultado.get("periodo", "mes"))
 
+        elif resultado["tipo"] == "relatorio_pagamento":
+            resposta = gerar_relatorio_pagamento(
+                telefone,
+                resultado.get("forma", "cartão"),
+                resultado.get("periodo", "mes")
+            )
+
         elif resultado["tipo"] == "remover_ultimo":
             gasto = remover_ultimo_gasto(telefone)
             if gasto:
@@ -248,7 +291,7 @@ async def webhook(
 
     except Exception as e:
         logger.error(f"Erro ao processar mensagem: {e}")
-        resposta = "⚠️ Não entendi sua mensagem. Tente:\n• 'mercado 50'\n• 'resumo'\n• 'remover último'"
+        resposta = "⚠️ Não entendi sua mensagem. Tente:\n• 'mercado 50'\n• 'resumo'\n• 'quanto gastei no cartão'"
 
     twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
@@ -258,5 +301,4 @@ async def webhook(
 
 @app.get("/")
 def health():
-    logger.info(f"SUPABASE_API configurado como: {SUPABASE_API}")
     return {"status": "Paylo.IA rodando! 🐒", "supabase_api": SUPABASE_API}

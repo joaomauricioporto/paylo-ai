@@ -64,25 +64,28 @@ def buscar_gastos(telefone, periodo="mes"):
 def buscar_por_forma_pagamento(telefone, forma, periodo="mes"):
     hoje = datetime.now()
     if periodo == "hoje":
-        filtro = hoje.strftime("%Y-%m-%d")
-        filtro_data = f"like.{filtro}%25"
+        filtro_data = hoje.strftime("%Y-%m-%d")
     elif periodo == "semana":
-        inicio = (hoje - timedelta(days=7)).strftime("%Y-%m-%d")
-        filtro_data = f"gte.{inicio}"
+        filtro_data = (hoje - timedelta(days=7)).strftime("%Y-%m-%d")
     else:
-        filtro = hoje.strftime("%Y-%m")
-        filtro_data = f"like.{filtro}%25"
+        filtro_data = hoje.strftime("%Y-%m")
 
-    url = (
-        f"{SUPABASE_API}/gastos"
-        f"?telefone=eq.{telefone}"
-        f"&forma_pagamento=ilike.*{forma}*"
-        f"&data={filtro_data}"
-        f"&order=id.desc"
-    )
-    r = httpx.get(url, headers=HEADERS)
+    # Busca todos os gastos do periodo e filtra em Python para evitar problema de encoding
+    if periodo == "hoje":
+        params = {"telefone": f"eq.{telefone}", "data": f"like.{filtro_data}%25", "order": "id.desc"}
+    elif periodo == "semana":
+        params = {"telefone": f"eq.{telefone}", "data": f"gte.{filtro_data}", "order": "id.desc"}
+    else:
+        params = {"telefone": f"eq.{telefone}", "data": f"like.{filtro_data}%25", "order": "id.desc"}
+
+    url = f"{SUPABASE_API}/gastos"
+    r = httpx.get(url, headers=HEADERS, params=params)
     r.raise_for_status()
-    return r.json()
+    todos = r.json()
+
+    # Filtra por forma de pagamento em Python
+    forma_lower = forma.lower()
+    return [g for g in todos if forma_lower in g.get("forma_pagamento", "").lower()]
 
 def remover_ultimo_gasto(telefone):
     url = f"{SUPABASE_API}/gastos"

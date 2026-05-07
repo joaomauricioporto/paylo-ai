@@ -100,37 +100,42 @@ def remover_ultimo_gasto(telefone):
 
 def remover_gasto_por_descricao(telefone, descricao):
     url = f"{SUPABASE_API}/gastos"
-    r = httpx.get(url, headers=HEADERS, params={"telefone": f"eq.{telefone}", "descricao": f"ilike.%{descricao}%", "order": "id.desc", "limit": "1"})
+    # Busca os últimos 50 e filtra em Python
+    params = {"telefone": f"eq.{telefone}", "order": "id.desc", "limit": "50"}
+    r = httpx.get(url, headers=HEADERS, params=params)
     r.raise_for_status()
     gastos = r.json()
-    if not gastos:
+    desc_lower = descricao.lower()
+    gastos_filtrados = [g for g in gastos if desc_lower in g.get("descricao", "").lower()]
+    if not gastos_filtrados:
         return None
-    gasto = gastos[0]
+    gasto = gastos_filtrados[0]
     httpx.delete(url, headers=HEADERS, params={"id": f"eq.{gasto['id']}"})
     return gasto
 
 def remover_gasto_por_categoria(telefone, categoria, valor=None):
     url = f"{SUPABASE_API}/gastos"
-    params = {"telefone": f"eq.{telefone}", "categoria": f"ilike.%{categoria}%", "order": "id.desc", "limit": "1"}
+    # Busca os últimos 50 gastos e filtra em Python para evitar problema de encoding
+    params = {"telefone": f"eq.{telefone}", "order": "id.desc", "limit": "50"}
     r = httpx.get(url, headers=HEADERS, params=params)
     r.raise_for_status()
     gastos = r.json()
 
-    if not gastos:
+    # Filtra por categoria em Python
+    cat_lower = categoria.lower()
+    gastos_cat = [g for g in gastos if cat_lower in g.get("categoria", "").lower()]
+
+    if not gastos_cat:
         return None
 
-    # Se valor foi especificado, busca o mais próximo desse valor
+    # Se valor especificado, busca o mais próximo
     if valor:
-        params["limit"] = "10"
-        r = httpx.get(url, headers=HEADERS, params=params)
-        r.raise_for_status()
-        gastos = r.json()
-        gastos_filtrados = [g for g in gastos if abs(g["valor"] - valor) < 0.01]
-        if not gastos_filtrados:
+        gastos_valor = [g for g in gastos_cat if abs(g["valor"] - valor) < 0.01]
+        if not gastos_valor:
             return None
-        gasto = gastos_filtrados[0]
+        gasto = gastos_valor[0]
     else:
-        gasto = gastos[0]
+        gasto = gastos_cat[0]
 
     httpx.delete(url, headers=HEADERS, params={"id": f"eq.{gasto['id']}"})
     return gasto

@@ -109,6 +109,32 @@ def remover_gasto_por_descricao(telefone, descricao):
     httpx.delete(url, headers=HEADERS, params={"id": f"eq.{gasto['id']}"})
     return gasto
 
+def remover_gasto_por_categoria(telefone, categoria, valor=None):
+    url = f"{SUPABASE_API}/gastos"
+    params = {"telefone": f"eq.{telefone}", "categoria": f"ilike.%{categoria}%", "order": "id.desc", "limit": "1"}
+    r = httpx.get(url, headers=HEADERS, params=params)
+    r.raise_for_status()
+    gastos = r.json()
+
+    if not gastos:
+        return None
+
+    # Se valor foi especificado, busca o mais próximo desse valor
+    if valor:
+        params["limit"] = "10"
+        r = httpx.get(url, headers=HEADERS, params=params)
+        r.raise_for_status()
+        gastos = r.json()
+        gastos_filtrados = [g for g in gastos if abs(g["valor"] - valor) < 0.01]
+        if not gastos_filtrados:
+            return None
+        gasto = gastos_filtrados[0]
+    else:
+        gasto = gastos[0]
+
+    httpx.delete(url, headers=HEADERS, params={"id": f"eq.{gasto['id']}"})
+    return gasto
+
 def listar_ultimos_gastos(telefone, limite=5):
     url = f"{SUPABASE_API}/gastos"
     r = httpx.get(url, headers=HEADERS, params={"telefone": f"eq.{telefone}", "order": "id.desc", "limit": str(limite)})
@@ -139,10 +165,15 @@ Formas: cartão, pix, débito, dinheiro, crédito
 5. REMOVER ESPECÍFICO (ex: "remover uber", "apagar mercado"):
 {"tipo": "remover_item", "descricao": "uber"}
 
-6. HISTÓRICO (ex: "últimos gastos", "o que registrei"):
+6. REMOVER POR CATEGORIA (ex: "remover lazer", "apagar alimentação", "remover 100 lazer", "extorno transporte"):
+{"tipo": "remover_categoria", "categoria": "Lazer", "valor": null}
+Se tiver valor especificado: {"tipo": "remover_categoria", "categoria": "Lazer", "valor": 100.0}
+Categorias: Alimentação, Transporte, Lazer, Saúde, Moradia, Educação, Vestuário, Outros
+
+7. HISTÓRICO (ex: "últimos gastos", "o que registrei"):
 {"tipo": "historico"}
 
-7. OUTROS (ex: "oi", "ajuda"):
+8. OUTROS (ex: "oi", "ajuda"):
 {"tipo": "ajuda"}"""
 
 def interpretar_mensagem(mensagem):
@@ -234,6 +265,8 @@ MENSAGEM_AJUDA = """🐒 *Olá! Sou o Paylo.IA, seu assistente financeiro!*
 *🗑️ Remover gastos:*
 • "remover último"
 • "remover uber"
+• "remover lazer"
+• "remover 100 lazer"
 
 *💡 Escreva de forma natural, eu entendo! 😊*"""
 
@@ -292,6 +325,15 @@ async def webhook(
                 resposta = f"🗑️ *Gasto removido!*\n\n📌 {gasto['descricao'].capitalize()} — R$ {gasto['valor']:.2f}"
             else:
                 resposta = "❌ Não encontrei nenhum gasto com esse nome."
+
+        elif resultado["tipo"] == "remover_categoria":
+            valor = resultado.get("valor")
+            gasto = remover_gasto_por_categoria(telefone, resultado.get("categoria", ""), valor)
+            if gasto:
+                resposta = f"🗑️ *Gasto removido!*\n\n📌 {gasto['descricao'].capitalize()} — R$ {gasto['valor']:.2f} ({gasto['categoria']})"
+            else:
+                cat = resultado.get("categoria", "")
+                resposta = f"❌ Não encontrei nenhum gasto em {cat}."
 
         elif resultado["tipo"] == "historico":
             resposta = gerar_historico(telefone)

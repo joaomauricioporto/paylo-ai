@@ -1,5 +1,7 @@
-from fastapi import FastAPI, Form, BackgroundTasks
+from fastapi import FastAPI, Form, BackgroundTasks, HTTPException, Request
 from fastapi.responses import PlainTextResponse
+from twilio.request_validator import RequestValidator
+from xml.sax.saxutils import escape
 import anthropic
 import json
 import os
@@ -18,6 +20,13 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
 
 client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 SUPABASE_API = f"{SUPABASE_URL}/rest/v1"
+
+# Twilio: o token serve para provar que o webhook veio mesmo da Twilio
+TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN", "")
+# Opcional: URL exata configurada na Twilio. Use se a validação falhar atrás do proxy da Render.
+WEBHOOK_PUBLIC_URL = os.getenv("WEBHOOK_PUBLIC_URL", "")
+validator = RequestValidator(TWILIO_AUTH_TOKEN)
+TWIML_VAZIO = '<?xml version="1.0" encoding="UTF-8"?><Response></Response>'
 
 HEADERS = {
     "apikey": SUPABASE_KEY,
@@ -41,6 +50,34 @@ def post(url, data):
 
 def delete(url, params):
     httpx.delete(url, headers=HEADERS, params=params)
+
+def url_publica(request):
+    """URL que a Twilio assinou. Atrás do proxy da Render o esquema pode chegar como http."""
+    if WEBHOOK_PUBLIC_URL:
+        return WEBHOOK_PUBLIC_URL
+    proto = request.headers.get("x-forwarded-proto", request.url.scheme).split(",")[0].strip()
+    return str(request.url.replace(scheme=proto))
+
+def assinatura_valida(request, form):
+    """Confere o header X-Twilio-Signature. Sem token configurado, bloqueia tudo."""
+    if not TWILIO_AUTH_TOKEN:
+        logger.error("TWILIO_AUTH_TOKEN não configurado: webhook bloqueado")
+        return False
+    assinatura = request.headers.get("X-Twilio-Signature", "")
+    return validator.validate(url_publica(request), form, assinatura)
+
+def registrar_mensagem(message_sid, telefone):
+    """Guarda o MessageSid. True = mensagem nova; False = já processada (reenvio da Twilio)."""
+    r = httpx.post(
+        f"{SUPABASE_API}/mensagens_processadas",
+        headers={**HEADERS, "Prefer": "return=minimal"},
+        json={"message_sid": message_sid, "telefone": telefone},
+        timeout=10,
+    )
+    if r.status_code == 409:  # chave primária repetida
+        return False
+    r.raise_for_status()
+    return True
 
 def filtro_mes(hoje, offset=0):
     """Retorna o prefixo YYYY-MM para o mês atual ou anterior."""
@@ -238,6 +275,9 @@ Períodos: hoje, semana, mes
 16. OUTROS (ex: "oi", "ajuda"):
 {"tipo": "ajuda"}"""
 
+class ErroInterpretacao(Exception):
+    """O modelo respondeu algo que não dá para usar (JSON inválido ou sem 'tipo')."""
+
 def interpretar_mensagem(mensagem):
     response = client.messages.create(
         model="claude-sonnet-4-6",
@@ -250,7 +290,13 @@ def interpretar_mensagem(mensagem):
         texto = texto.split("```")[1]
         if texto.startswith("json"):
             texto = texto[4:]
-    return json.loads(texto.strip())
+    try:
+        resultado = json.loads(texto.strip())
+    except json.JSONDecodeError as e:
+        raise ErroInterpretacao(f"JSON inválido do modelo: {texto[:200]!r}") from e
+    if not isinstance(resultado, dict) or "tipo" not in resultado:
+        raise ErroInterpretacao(f"Resposta sem 'tipo': {resultado!r}")
+    return resultado
 
 # ============================================================
 # RELATÓRIOS
@@ -453,12 +499,21 @@ MENSAGEM_AJUDA = """🐒 *Paylo.IA — Seu assistente financeiro!*
 # WEBHOOK
 # ============================================================
 @app.post("/webhook", response_class=PlainTextResponse)
-async def webhook(Body: str = Form(...), From: str = Form(...)):
+async def webhook(request: Request, Body: str = Form(...), From: str = Form(...), MessageSid: str = Form(...)):
+    form = await request.form()
+    if not assinatura_valida(request, form):
+        logger.warning(f"Assinatura Twilio inválida (URL usada: {url_publica(request)})")
+        raise HTTPException(status_code=403, detail="Assinatura inválida")
+
     mensagem = Body.strip()
     telefone = From
     logger.info(f"Mensagem de {telefone}: {mensagem}")
 
     try:
+        if not registrar_mensagem(MessageSid, telefone):
+            logger.info(f"Reenvio ignorado (MessageSid {MessageSid})")
+            return PlainTextResponse(content=TWIML_VAZIO, media_type="application/xml")
+
         resultado = interpretar_mensagem(mensagem)
         logger.info(f"Interpretado: {resultado}")
         tipo = resultado["tipo"]
@@ -549,13 +604,23 @@ async def webhook(Body: str = Form(...), From: str = Form(...)):
         else:
             resposta = MENSAGEM_AJUDA
 
-    except Exception as e:
-        logger.error(f"Erro: {e}")
+    except (httpx.HTTPError, anthropic.APIError) as e:
+        # Infraestrutura: banco fora do ar, API da Anthropic indisponível, timeout...
+        logger.exception(f"Falha de infraestrutura: {e!r}")
+        resposta = "⚠️ Tive um problema técnico. Tenta de novo em instantes."
+
+    except (ErroInterpretacao, KeyError, TypeError, ValueError) as e:
+        # Interpretação: o modelo devolveu algo inválido ou incompleto
+        logger.exception(f"Falha de interpretação: {e!r}")
         resposta = "⚠️ Não entendi sua mensagem.\n\nMande 'ajuda' para ver os comandos disponíveis."
+
+    except Exception as e:
+        logger.exception(f"Erro inesperado: {e!r}")
+        resposta = "⚠️ Tive um problema técnico. Tenta de novo em instantes."
 
     twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-    <Message>{resposta}</Message>
+    <Message>{escape(resposta)}</Message>
 </Response>"""
     return PlainTextResponse(content=twiml, media_type="application/xml")
 

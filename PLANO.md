@@ -8,7 +8,7 @@ Uma etapa por sessão, sempre em uma branch. Ao terminar uma etapa, marque aqui 
 - [x] 5.2 Saída estruturada (branch `etapa-5-2`, ver "Resultado da 5.2" abaixo; validada com a API real)
 - [x] 6.3 Async com timeouts (branch `etapa-6-3`, ver "Resultado da 6.3" abaixo; validada com a API real)
 - [x] 6.4 Corrida nas remoções (branch `etapa-6-4`, ver "Resultado da 6.4" abaixo; **falta rodar `sql/002_remover_ultimo.sql` no Supabase antes do merge**)
-- [x] 6.1 Parser determinístico antes do modelo (branch `etapa-6-1`, ver "Resultado da 6.1" abaixo; **só merge depois de `scripts/comparar_parser.py` com zero divergências**)
+- [x] 6.1 Parser determinístico antes do modelo (branch `etapa-6-1`, ver "Resultado da 6.1" abaixo; `scripts/comparar_parser.py` com a API real: zero divergências, merge liberado)
 - [ ] 6.2 Registro do tipo de intenção
 - [ ] 6.5 Fila no webhook
 
@@ -83,7 +83,7 @@ O plano abaixo foi escrito sem ver o código. A realidade do repositório:
 - Fora de propósito: gasto, receita, relatórios, lembretes, remover_item/categoria (categoria, descrição e forma de pagamento dependem de julgamento do modelo).
 - `interpretar_mensagem` chama o parser e só então `interpretar_com_modelo` (o código antigo, renomeado); o log diz `caminho=parser` ou `caminho=modelo`.
 - Testes: `tests/test_etapa_6_1.py`. Os testes antigos que usavam "oi"/"saldo" para exercitar o modelo passaram a usar "oi, tudo bem?"/"saldo de março".
-- Falta: rodar `scripts/comparar_parser.py` com chave real (zero divergências libera o merge).
+- Validada com a API real: `scripts/comparar_parser.py` deu `RESULTADO: OK`, zero divergências (rodado pelo João).
 
 ## Etapa 5.1: Atualização do SDK Anthropic, Modelo Haiku e Prompt Caching
 

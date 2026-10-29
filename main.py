@@ -81,7 +81,21 @@ async def post(url, data):
     return r.json()
 
 async def delete(url, params):
-    await requisitar("DELETE", url, params=params)
+    """Apaga e devolve as linhas realmente apagadas ([] se nada casou). Erro do Supabase levanta."""
+    # HEADERS já traz Prefer: return=representation, que faz o DELETE devolver a linha apagada
+    r = await requisitar("DELETE", url, params=params)
+    r.raise_for_status()
+    return r.json() if r.content else []
+
+async def apagar_do_usuario(tabela, telefone, id):
+    """Apaga uma linha pelo id, sempre filtrando pelo telefone. None = já não existia (ou não é do usuário)."""
+    apagadas = await delete(f"{SUPABASE_API}/{tabela}", {"id": f"eq.{id}", "telefone": f"eq.{telefone}"})
+    return apagadas[0] if apagadas else None
+
+async def rpc(funcao, args):
+    r = await requisitar("POST", f"{SUPABASE_API}/rpc/{funcao}", json=args)
+    r.raise_for_status()
+    return r.json()
 
 def url_publica(request):
     """URL que a Twilio assinou. Atrás do proxy da Render o esquema pode chegar como http."""
@@ -156,21 +170,16 @@ async def salvar_gasto(descricao, valor, categoria, forma_pagamento, telefone):
     return resultado[0]["id"] if resultado else "?"
 
 async def remover_ultimo_gasto(telefone):
-    url = f"{SUPABASE_API}/gastos"
-    gastos = await get(url, {"telefone": f"eq.{telefone}", "order": "id.desc", "limit": "1"})
-    if not gastos: return None
-    gasto = gastos[0]
-    await delete(url, {"id": f"eq.{gasto['id']}"})
-    return gasto
+    # Função SQL (sql/002_remover_ultimo.sql): escolhe e apaga numa só instrução
+    apagados = await rpc("remover_ultimo_gasto", {"p_telefone": telefone})
+    return apagados[0] if apagados else None
 
 async def remover_gasto_por_descricao(telefone, descricao):
     url = f"{SUPABASE_API}/gastos"
     gastos = await get(url, {"telefone": f"eq.{telefone}", "order": "id.desc", "limit": "50"})
     filtrados = [g for g in gastos if descricao.lower() in g.get("descricao", "").lower()]
     if not filtrados: return None
-    gasto = filtrados[0]
-    await delete(url, {"id": f"eq.{gasto['id']}"})
-    return gasto
+    return await apagar_do_usuario("gastos", telefone, filtrados[0]["id"])
 
 async def remover_gasto_por_categoria(telefone, categoria, valor=None):
     url = f"{SUPABASE_API}/gastos"
@@ -183,8 +192,7 @@ async def remover_gasto_por_categoria(telefone, categoria, valor=None):
         gasto = por_valor[0]
     else:
         gasto = filtrados[0]
-    await delete(url, {"id": f"eq.{gasto['id']}"})
-    return gasto
+    return await apagar_do_usuario("gastos", telefone, gasto["id"])
 
 async def listar_ultimos_gastos(telefone, limite=5):
     return await get(f"{SUPABASE_API}/gastos", {"telefone": f"eq.{telefone}", "order": "id.desc", "limit": str(limite)})
@@ -248,9 +256,7 @@ async def remover_lembrete(telefone, descricao):
     lembretes = await get(url, {"telefone": f"eq.{telefone}", "order": "id.desc", "limit": "50"})
     filtrados = [l for l in lembretes if descricao.lower() in l.get("descricao", "").lower()]
     if not filtrados: return None
-    lembrete = filtrados[0]
-    await delete(url, {"id": f"eq.{lembrete['id']}"})
-    return lembrete
+    return await apagar_do_usuario("lembretes", telefone, filtrados[0]["id"])
 
 # ============================================================
 # IA

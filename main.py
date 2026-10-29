@@ -278,14 +278,25 @@ Períodos: hoje, semana, mes
 class ErroInterpretacao(Exception):
     """O modelo respondeu algo que não dá para usar (JSON inválido ou sem 'tipo')."""
 
+MODELO_IA = "claude-haiku-5-5"
+
 def interpretar_mensagem(mensagem):
     response = client.messages.create(
-        model="claude-sonnet-4-6",
+        model=MODELO_IA,
         max_tokens=400,
-        system=SYSTEM_PROMPT,
+        # Haiku 5.5 pensa por padrão; para classificar a mensagem não é preciso
+        # (e o raciocínio gastaria os 400 tokens antes do JSON).
+        thinking={"type": "disabled"},
+        # Bloco estático com cache: o prompt precisa passar de 512 tokens (mínimo do Haiku 5.5).
+        system=[{"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
         messages=[{"role": "user", "content": mensagem}]
     )
-    texto = response.content[0].text.strip()
+    usage = response.usage
+    logger.info(
+        f"Tokens: entrada={usage.input_tokens} saída={usage.output_tokens} "
+        f"cache_escrito={usage.cache_creation_input_tokens} cache_lido={usage.cache_read_input_tokens}"
+    )
+    texto = next((b.text for b in response.content if b.type == "text"), "").strip()
     if texto.startswith("```"):
         texto = texto.split("```")[1]
         if texto.startswith("json"):

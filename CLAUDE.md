@@ -39,11 +39,11 @@ Render, serviço `mono-bot`. **Push na `main` faz deploy automático e vai ao ar
 - Mudança de schema vira um novo arquivo em `sql/`, avisando o João para rodar no Supabase.
 - Mensagens que o bot envia ao usuário são em português, com o estilo atual (emojis, `*negrito*` do WhatsApp).
 - Erros de interpretação ("Não entendi") e de infraestrutura ("problema técnico") ficam separados em `webhook`; mantenha assim e use `logger.exception`.
-- Ainda não há suíte de testes. Ao mexer no webhook, teste com `fastapi.testclient` simulando assinatura, duplicata e erros.
+- Testes em `tests/` (`pip install pytest` e `pytest tests`), sem rede, com dublês para Anthropic e Supabase. Ao mexer no webhook, teste com `fastapi.testclient` simulando assinatura, duplicata e erros.
 - Gastar poucos tokens: leia só os arquivos e trechos necessários (`main.py` tem ~570 linhas) e faça uma etapa por sessão.
 
 ## Estado e próximos passos
 
-Já feito: validação da assinatura da Twilio, escape do XML, idempotência por `MessageSid`, separação dos tipos de erro, restauração do Supabase.
+Já feito: validação da assinatura da Twilio, escape do XML, idempotência por `MessageSid`, separação dos tipos de erro, restauração do Supabase, etapa 5.1 (Haiku 5.5 + cache do system prompt + SDK 2.3.0; medição com chave real pendente, ver `PLANO.md`).
 
-O que falta está no `PLANO.md` (quando existir). Se não existir, a ordem sugerida é: (5) Haiku + cache do system prompt + saída estruturada (atualizar o SDK `anthropic`), (6) async com timeouts, corrida nas remoções, medir tipos de intenção, parser antes do modelo e fila.
+O que falta está no `PLANO.md` (quando existir). Se não existir, a ordem sugerida é: (5.2) saída estruturada, (6) async com timeouts, corrida nas remoções, medir tipos de intenção, parser antes do modelo e fila.

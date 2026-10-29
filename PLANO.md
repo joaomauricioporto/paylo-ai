@@ -4,7 +4,7 @@ Uma etapa por sessão, sempre em uma branch. Ao terminar uma etapa, marque aqui 
 
 ## Progresso
 
-- [ ] 5.1 SDK, modelo Haiku e cache do prompt
+- [x] 5.1 SDK, modelo Haiku e cache do prompt (branch `etapa-5-1`, ver "Resultado da 5.1" abaixo)
 - [ ] 5.2 Saída estruturada
 - [ ] 6.3 Async com timeouts
 - [ ] 6.4 Corrida nas remoções
@@ -29,6 +29,16 @@ O plano abaixo foi escrito sem ver o código. A realidade do repositório:
 - Etapa 6.2: em vez de nova tabela, acrescente `intent_type` e `parsed_by` em `mensagens_processadas` (migração `002`) e preencha depois da interpretação.
 - Etapa 6.4: o helper `delete()` não verifica erro, e as remoções fazem SELECT e depois DELETE. Use `DELETE ... RETURNING` (no PostgREST, header `Prefer: return=representation`) e, para "remover último", uma função SQL (RPC) que apague e retorne a linha numa só instrução. Filtre sempre por `telefone`.
 - Etapa 6.5: responder pela API REST da Twilio exige variáveis novas na Render (`TWILIO_ACCOUNT_SID` e o número remetente do WhatsApp), que o João precisa criar. Uma fila em memória perde mensagens se o serviço reiniciar ou dormir (plano gratuito da Render), e a idempotência já marca a mensagem como processada antes de tratá-la. Decida e documente como evitar que uma mensagem se perca sem resposta.
+
+## Resultado da 5.1
+
+- Conferido na documentação (platform.claude.com) em 2026-10-28: modelo `claude-haiku-5-5` (o atual; aposentadoria não antes de 07/10/2027); mínimo de cache **512 tokens** no Haiku 5.5 (4.096 no Haiku 4.5 e 1.024 no Sonnet 4.6). A suspeita do ajuste sobre o Haiku ficar abaixo do mínimo não se confirma: o prompt tem 2.311 caracteres (cerca de 700 a 900 tokens). Cache não exige header beta.
+- Haiku 5.5 pensa por padrão. Por isso `interpretar_mensagem` manda `thinking={"type": "disabled"}` (aceito em esforço `high` ou menos; o padrão é `medium`) e lê o primeiro bloco de tipo `text`, não `content[0]`.
+- `anthropic` foi de 0.49.0 para 2.3.0 (instala junto com `httpx==0.27.0`; o SDK usa `httpx2` por dentro). Timeouts ficam para a 6.3.
+- O uso de tokens (`entrada`, `saída`, `cache_escrito`, `cache_lido`) agora aparece no log de cada mensagem.
+- Testes: `tests/test_etapa_5_1.py` (pytest, sem rede). Requisição verificada com o SDK real contra um servidor local.
+- **Pendente (precisa da chave):** medir `response.usage` de verdade. Rode `ANTHROPIC_API_KEY=... python scripts/medir_usage.py` e confira `cache_creation_input_tokens > 0` na 1ª chamada e `cache_read_input_tokens > 0` nas seguintes. Ou veja a linha "Tokens:" nos logs da Render depois do deploy. Se `cache_escrito` ficar 0, o prompt está abaixo do mínimo e o `cache_control` pode ser removido.
+- A comparação Haiku sem cache vs Sonnet com cache em 30 mensagens não foi feita: o Sonnet 4.6 exige 1.024 tokens para cachear, então ele nem usaria cache com este prompt.
 
 ---
 

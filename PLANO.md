@@ -7,9 +7,9 @@ Uma etapa por sessão, sempre em uma branch. Ao terminar uma etapa, marque aqui 
 - [x] 5.1 SDK, modelo Haiku e cache do prompt (branch `etapa-5-1`, ver "Resultado da 5.1" abaixo)
 - [x] 5.2 Saída estruturada (branch `etapa-5-2`, ver "Resultado da 5.2" abaixo; validada com a API real)
 - [x] 6.3 Async com timeouts (branch `etapa-6-3`, ver "Resultado da 6.3" abaixo; validada com a API real)
-- [x] 6.4 Corrida nas remoções (branch `etapa-6-4`, ver "Resultado da 6.4" abaixo; **falta rodar `sql/002_remover_ultimo.sql` no Supabase antes do merge**)
+- [x] 6.4 Corrida nas remoções (branch `etapa-6-4`, ver "Resultado da 6.4" abaixo; `sql/002_remover_ultimo.sql` já rodado no Supabase)
 - [x] 6.1 Parser determinístico antes do modelo (branch `etapa-6-1`, ver "Resultado da 6.1" abaixo; `scripts/comparar_parser.py` com a API real: zero divergências, merge liberado)
-- [x] 6.2 Registro do tipo de intenção (branch `etapa-6-2`, ver "Resultado da 6.2" abaixo; **falta rodar `sql/003_intent_parsed_by.sql` no Supabase** — o código funciona sem ele)
+- [x] 6.2 Registro do tipo de intenção (branch `etapa-6-2`, ver "Resultado da 6.2" abaixo; `sql/003_intent_parsed_by.sql` já rodado no Supabase)
 - [ ] 6.5 Fila no webhook
 
 Ordem sugerida: 5.1, 5.2, 6.3, 6.4, 6.1, 6.2, 6.5.

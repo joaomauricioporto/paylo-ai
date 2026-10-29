@@ -44,6 +44,6 @@ Render, serviço `mono-bot`. **Push na `main` faz deploy automático e vai ao ar
 
 ## Estado e próximos passos
 
-Já feito: validação da assinatura da Twilio, escape do XML, idempotência por `MessageSid`, separação dos tipos de erro, restauração do Supabase, etapa 5.1 (Haiku 5.5 + cache do system prompt + SDK 2.3.0; medição com chave real pendente, ver `PLANO.md`).
+Já feito: validação da assinatura da Twilio, escape do XML, idempotência por `MessageSid`, separação dos tipos de erro, restauração do Supabase, etapa 5.1 (Haiku 5.5 + cache do system prompt + SDK 2.3.0; medido com chave real, ver `PLANO.md`).
 
 O que falta está no `PLANO.md` (quando existir). Se não existir, a ordem sugerida é: (5.2) saída estruturada, (6) async com timeouts, corrida nas remoções, medir tipos de intenção, parser antes do modelo e fila.

@@ -37,8 +37,8 @@ O plano abaixo foi escrito sem ver o código. A realidade do repositório:
 - `anthropic` foi de 0.49.0 para 2.3.0 (instala junto com `httpx==0.27.0`; o SDK usa `httpx2` por dentro). Timeouts ficam para a 6.3.
 - O uso de tokens (`entrada`, `saída`, `cache_escrito`, `cache_lido`) agora aparece no log de cada mensagem.
 - Testes: `tests/test_etapa_5_1.py` (pytest, sem rede). Requisição verificada com o SDK real contra um servidor local.
-- **Pendente (precisa da chave):** medir `response.usage` de verdade. Rode `ANTHROPIC_API_KEY=... python scripts/medir_usage.py` e confira `cache_creation_input_tokens > 0` na 1ª chamada e `cache_read_input_tokens > 0` nas seguintes. Ou veja a linha "Tokens:" nos logs da Render depois do deploy. Se `cache_escrito` ficar 0, o prompt está abaixo do mínimo e o `cache_control` pode ser removido.
-- Comparação Haiku vs Sonnet 4.6 (30 mensagens): rode `ANTHROPIC_API_KEY=... python scripts/comparar_modelos.py`; ele mostra só onde tipo, valor ou categoria divergem e o uso de cache de cada modelo. Correção: antes eu escrevi aqui que o Sonnet 4.6 não cachearia com este prompt, mas isso partia de uma estimativa de tamanho que não medi. O mínimo do Sonnet 4.6 é 1.024 tokens (reconferido na doc) e o prompt mede 1.247 num dos modelos, então ele cachearia, salvo se o tokenizer do Sonnet 4.6, que gera menos tokens que o do Haiku 5.5, deixar o prompt abaixo de 1.024. O script imprime a contagem em cada modelo.
+- **Decisão (2026-10-28): produção fica com Haiku 5.5 + cache.** Medido com chave real: o cache funcionou no Haiku (`cache_escrito` na 1ª chamada, `cache_lido` nas seguintes). Em 30 mensagens os dois modelos divergiram só em 1 ("comprei remédio 23 e 50": Haiku 23,50, Sonnet 73,00) e o Haiku acertou. O Sonnet 4.6 não cacheia com este prompt (899 tokens no tokenizer dele, mínimo 1.024; no Haiku 5.5 o prompt mede 1.247, mínimo 512), então seria mais caro e mais lento. Se o prompt crescer, lembre que o limite do Sonnet é outro.
+- Comparação feita com `scripts/comparar_modelos.py` (resultado na decisão acima). A estimativa inicial de 700 a 900 tokens era para o Sonnet; o Haiku 5.5 conta mais tokens para o mesmo texto.
 
 ---
 

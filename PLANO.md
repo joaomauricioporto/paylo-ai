@@ -6,7 +6,7 @@ Uma etapa por sessão, sempre em uma branch. Ao terminar uma etapa, marque aqui 
 
 - [x] 5.1 SDK, modelo Haiku e cache do prompt (branch `etapa-5-1`, ver "Resultado da 5.1" abaixo)
 - [x] 5.2 Saída estruturada (branch `etapa-5-2`, ver "Resultado da 5.2" abaixo; validada com a API real)
-- [ ] 6.3 Async com timeouts
+- [x] 6.3 Async com timeouts (branch `etapa-6-3`, ver "Resultado da 6.3" abaixo; validada com a API real)
 - [ ] 6.4 Corrida nas remoções
 - [ ] 6.1 Parser determinístico antes do modelo
 - [ ] 6.2 Registro do tipo de intenção
@@ -49,6 +49,17 @@ O plano abaixo foi escrito sem ver o código. A realidade do repositório:
 - `interpretar_mensagem` valida com `TypeAdapter` da união e devolve `model_dump()`, o mesmo dict de antes. Campos extras são descartados; campos faltando, tipo desconhecido, `periodo` fora de hoje/semana/mes e `dia_vencimento` fora de 1 a 31 levantam `ErroInterpretacao` ("Não entendi"). Categoria e forma de pagamento seguem texto livre, como antes.
 - Testes: `tests/test_etapa_5_2.py` (sem rede). O teste da 5.1 sobre cerca de markdown foi trocado por um que garante que cerca levanta `ErroInterpretacao`. `pydantic==2.12.5` entrou em `requirements.txt` (já vinha pelo `fastapi`, agora está fixo).
 - **Validação com a API real passou** (2026-10-28, `scripts/validar_schema.py`): schema aceito e 18 de 18 intenções batendo, com `thinking` desativado e cache no system. O cache com o schema tem 3.520 tokens. O plano B (objeto raiz com campo `intencao`) não foi preciso.
+
+## Resultado da 6.3
+
+- Tudo continua em `main.py`. Supabase: `httpx.AsyncClient` único (`db()`, criado no 1º uso e fechado no `lifespan`), com `httpx.Timeout(5.0, connect=3.0)` e, por cima, `asyncio.wait_for` de 5s por chamada (`requisitar`). Anthropic: `AsyncAnthropic` com timeout de 10s (conexão 3s). Toda função que toca a rede virou `async def`; `/` (health) segue síncrona por não fazer I/O.
+- O SDK 2.3.0 usa `httpx2` e **recusa `httpx.Timeout`** (`TypeError`); por isso o timeout do cliente é `anthropic.Timeout`. O do Supabase continua `httpx.Timeout`.
+- `max_retries=0` no cliente da Anthropic (o padrão do SDK são 2): a Twilio desiste em 15s, e um retry depois de 10s de timeout só estouraria o prazo. Se quiser retentativa para 429/529, o caminho é um prazo total, não só `max_retries`.
+- Mapeamento de erros: `httpx.TimeoutException` e `anthropic.APITimeoutError` já eram subclasses de `httpx.HTTPError`/`anthropic.APIError`; o `asyncio.TimeoutError` do `wait_for` entrou na mesma cláusula de infraestrutura do `webhook`. Textos das respostas inalterados ("problema técnico" para infra, "Não entendi" para interpretação).
+- Comportamento preservado de propósito: `delete()` continua sem checar erro (a 6.4 resolve) e as consultas seguem em sequência (nada de `gather` ainda). O `registrar_mensagem`, que tinha timeout de 10s, passou a usar os mesmos 5s do resto.
+- Ainda não coberto: o webhook inteiro pode passar de 15s no pior caso (modelo 10s + várias chamadas de 5s). A 6.5 (fila) é quem resolve isso.
+- Testes: `tests/test_etapa_6_3.py` (sem rede externa; timeouts verificados contra um servidor local que nunca responde; checagem por AST de que não sobrou chamada síncrona). Os testes da 5.1 e 5.2 foram adaptados (dublês `async`, `asyncio.run`).
+- **Validação com a API real passou** (2026-10-29, `scripts/validar_async.py`: 15 mensagens pelo webhook + lote de 5 em paralelo; Supabase em memória, nada é gravado): 20 de 20 ok. Latência: 1,26s por mensagem em média (sequencial); o lote de 5 levou 1,56s contra 6,36s em fila, ou seja, as chamadas rodam de fato em paralelo. Uso nas 20 chamadas: entrada=250, saída=591, `cache_escrito=0`, `cache_lido=70.400` (3.520 por chamada, o prompt com o schema inteiro vindo do cache). O cache já estava aquecido por execuções anteriores, por isso nenhum `cache_escrito`.
 
 ---
 

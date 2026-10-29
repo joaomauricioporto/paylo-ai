@@ -2,6 +2,7 @@
 
 Roda sem rede: o cliente da Anthropic e o Supabase são trocados por dublês.
 """
+import asyncio
 import json
 import os
 from types import SimpleNamespace
@@ -20,6 +21,12 @@ from twilio.request_validator import RequestValidator
 import main
 
 URL = "http://testserver/webhook"
+
+
+def registro(nova):
+    async def registrar_mensagem(sid, telefone):
+        return nova
+    return registrar_mensagem
 
 # Uma resposta válida para cada uma das 16 intenções do SYSTEM_PROMPT.
 INTENCOES = [
@@ -55,7 +62,7 @@ class ClienteFalso:
         self.resp, self.erro = resp, erro
         self.messages = SimpleNamespace(create=self.create)
 
-    def create(self, **kwargs):
+    async def create(self, **kwargs):
         self.chamadas.append(kwargs)
         if self.erro:
             raise self.erro
@@ -84,11 +91,11 @@ def test_a_lista_de_teste_cobre_as_16_intencoes_do_prompt():
 @pytest.mark.parametrize("esperado", INTENCOES, ids=lambda i: i["tipo"])
 def test_intencao_valida_devolve_o_mesmo_dict(falso, esperado):
     falso.resp = resposta(json.dumps(esperado, ensure_ascii=False))
-    assert main.interpretar_mensagem("qualquer") == esperado
+    assert asyncio.run(main.interpretar_mensagem("qualquer")) == esperado
 
 
 def test_pedido_leva_o_schema_e_mantem_haiku_cache_e_sem_thinking(falso):
-    main.interpretar_mensagem("saldo")
+    asyncio.run(main.interpretar_mensagem("saldo"))
     pedido = falso.chamadas[0]
     assert pedido["output_config"] == {"format": {"type": "json_schema", "schema": main.SCHEMA_INTENCAO}}
     enviado = json.dumps(pedido["output_config"])
@@ -142,24 +149,24 @@ def test_schema_enviado_so_usa_o_que_a_api_aceita():
 def test_resposta_fora_do_schema_levanta_erro_de_interpretacao(falso, texto):
     falso.resp = resposta(texto)
     with pytest.raises(main.ErroInterpretacao):
-        main.interpretar_mensagem("???")
+        asyncio.run(main.interpretar_mensagem("???"))
 
 
 @pytest.mark.parametrize("stop_reason", ["refusal", "max_tokens"])
 def test_recusa_ou_corte_levanta_erro_de_interpretacao(falso, stop_reason):
     falso.resp = resposta('{"tipo": "ajuda"}', stop_reason=stop_reason)
     with pytest.raises(main.ErroInterpretacao):
-        main.interpretar_mensagem("oi")
+        asyncio.run(main.interpretar_mensagem("oi"))
 
 
 def test_campo_extra_e_descartado(falso):
     falso.resp = resposta('{"tipo": "saldo", "periodo": "mes", "extra": 1}')
-    assert main.interpretar_mensagem("saldo") == {"tipo": "saldo", "periodo": "mes"}
+    assert asyncio.run(main.interpretar_mensagem("saldo")) == {"tipo": "saldo", "periodo": "mes"}
 
 
 @pytest.fixture
 def webhook(falso, monkeypatch):
-    monkeypatch.setattr(main, "registrar_mensagem", lambda sid, tel: True)
+    monkeypatch.setattr(main, "registrar_mensagem", registro(True))
     return falso
 
 

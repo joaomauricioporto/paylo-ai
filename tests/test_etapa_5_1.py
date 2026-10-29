@@ -2,6 +2,7 @@
 
 Roda sem rede: o cliente da Anthropic e o Supabase são trocados por dublês.
 """
+import asyncio
 import logging
 import os
 from types import SimpleNamespace
@@ -22,6 +23,12 @@ import main
 URL = "http://testserver/webhook"
 
 
+def registro(nova):
+    async def registrar_mensagem(sid, telefone):
+        return nova
+    return registrar_mensagem
+
+
 def resposta(texto, **uso):
     usage = SimpleNamespace(input_tokens=5, output_tokens=20,
                             cache_creation_input_tokens=0, cache_read_input_tokens=0)
@@ -36,7 +43,7 @@ class ClienteFalso:
         self.resp, self.erro = resp, erro
         self.messages = SimpleNamespace(create=self.create)
 
-    def create(self, **kwargs):
+    async def create(self, **kwargs):
         self.chamadas.append(kwargs)
         if self.erro:
             raise self.erro
@@ -57,7 +64,7 @@ def post(corpo="oi", sid="SM1"):
 
 
 def test_pedido_usa_haiku_cache_e_sem_thinking(falso):
-    assert main.interpretar_mensagem("saldo") == {"tipo": "ajuda"}
+    assert asyncio.run(main.interpretar_mensagem("saldo")) == {"tipo": "ajuda"}
     pedido = falso.chamadas[0]
     assert pedido["model"] == "claude-haiku-5-5"
     assert pedido["thinking"] == {"type": "disabled"}
@@ -70,26 +77,26 @@ def test_pedido_usa_haiku_cache_e_sem_thinking(falso):
 def test_uso_de_tokens_vai_para_o_log(falso, caplog):
     falso.resp = resposta('{"tipo": "ajuda"}', cache_creation_input_tokens=1100)
     with caplog.at_level(logging.INFO):
-        main.interpretar_mensagem("saldo")
+        asyncio.run(main.interpretar_mensagem("saldo"))
     assert "cache_escrito=1100" in caplog.text
 
 
 def test_le_o_texto_mesmo_com_bloco_de_thinking_antes(falso):
     falso.resp.content.insert(0, SimpleNamespace(type="thinking", thinking=""))
-    assert main.interpretar_mensagem("oi") == {"tipo": "ajuda"}
+    assert asyncio.run(main.interpretar_mensagem("oi")) == {"tipo": "ajuda"}
 
 
 def test_json_em_cerca_de_markdown_levanta_erro_de_interpretacao(falso):
     # Desde a 5.2 a API devolve JSON puro, então a cerca de markdown deixou de ser aceita.
     falso.resp = resposta('```json\n{"tipo": "saldo", "periodo": "mes"}\n```')
     with pytest.raises(main.ErroInterpretacao):
-        main.interpretar_mensagem("saldo")
+        asyncio.run(main.interpretar_mensagem("saldo"))
 
 
 def test_json_invalido_vira_erro_de_interpretacao(falso):
     falso.resp = resposta("não sei")
     with pytest.raises(main.ErroInterpretacao):
-        main.interpretar_mensagem("???")
+        asyncio.run(main.interpretar_mensagem("???"))
 
 
 def test_webhook_assinatura_invalida_403(falso):
@@ -100,26 +107,26 @@ def test_webhook_assinatura_invalida_403(falso):
 
 
 def test_webhook_duplicata_nao_chama_o_modelo(falso, monkeypatch):
-    monkeypatch.setattr(main, "registrar_mensagem", lambda sid, tel: False)
+    monkeypatch.setattr(main, "registrar_mensagem", registro(False))
     r = post()
     assert r.status_code == 200 and "<Response></Response>" in r.text
     assert falso.chamadas == []
 
 
 def test_webhook_mensagem_nova_responde(falso, monkeypatch):
-    monkeypatch.setattr(main, "registrar_mensagem", lambda sid, tel: True)
+    monkeypatch.setattr(main, "registrar_mensagem", registro(True))
     r = post()
     assert r.status_code == 200 and "Message" in r.text
     assert len(falso.chamadas) == 1
 
 
 def test_webhook_erro_de_interpretacao_diz_nao_entendi(falso, monkeypatch):
-    monkeypatch.setattr(main, "registrar_mensagem", lambda sid, tel: True)
+    monkeypatch.setattr(main, "registrar_mensagem", registro(True))
     falso.resp = resposta("lixo")
     assert "entendi" in post().text.lower()
 
 
 def test_webhook_erro_da_anthropic_diz_problema_tecnico(falso, monkeypatch):
-    monkeypatch.setattr(main, "registrar_mensagem", lambda sid, tel: True)
+    monkeypatch.setattr(main, "registrar_mensagem", registro(True))
     falso.erro = anthropic.APIConnectionError(request=httpx.Request("POST", "http://x"))
     assert "técnico" in post().text.lower()

@@ -6,6 +6,8 @@ from xml.sax.saxutils import escape
 import anthropic
 import asyncio
 import os
+import re
+import unicodedata
 from datetime import datetime, timedelta
 from typing import Annotated, Literal, Optional, Union
 import httpx
@@ -425,7 +427,58 @@ SCHEMA_INTENCAO = anthropic.transform_schema(_simplificar_schema(INTENCAO.json_s
 
 MODELO_IA = "claude-haiku-5-5"
 
+# ------------------------------------------------------------
+# Parser determinístico (caminho rápido, sem chamar o modelo)
+# ------------------------------------------------------------
+# Só entra o que é inequívoco e cujos campos saem idênticos ao que o modelo devolve. Na dúvida,
+# devolve None e o modelo decide. Mensagem que não bate exatamente com uma frase abaixo não é coberta.
+def _normalizar(texto):
+    """Minúsculas, sem acentos e com espaços únicos."""
+    sem_acento = "".join(c for c in unicodedata.normalize("NFD", texto) if unicodedata.category(c) != "Mn")
+    return " ".join(sem_acento.lower().split())
+
+_COMANDOS_FIXOS = {}
+for _tipo, _frases in {
+    "ajuda": ("oi", "ola", "ajuda"),
+    "comparativo": ("comparar meses", "comparativo"),
+    "ver_metas": ("minhas metas", "metas", "ver metas"),
+    "ver_lembretes": ("meus lembretes", "ver lembretes"),
+    "historico": ("ultimos gastos",),
+    "remover_ultimo": ("remover ultimo", "desfazer"),
+}.items():
+    for _frase in _frases:
+        _COMANDOS_FIXOS[_frase] = {"tipo": _tipo}
+for _frase in ("saldo", "quanto tenho", "quanto sobrou"):
+    _COMANDOS_FIXOS[_frase] = {"tipo": "saldo", "periodo": "mes"}
+
+_CATEGORIAS_GASTO = {_normalizar(c): c for c in (
+    "Alimentação", "Transporte", "Lazer", "Saúde", "Moradia", "Educação", "Vestuário", "Outros")}
+# Número simples: inteiro, ou decimal com 1 ou 2 casas ("1.500" é ambíguo e fica para o modelo).
+_META = re.compile(r"(?:meta|limite|definir meta) ([a-z]+) (\d+(?:[.,]\d{1,2})?)")
+
+def parse_deterministico(texto):
+    """Devolve o mesmo dict que `interpretar_mensagem` devolveria, ou None se não tiver certeza."""
+    chave = _normalizar(texto)
+    if chave in _COMANDOS_FIXOS:
+        resultado = dict(_COMANDOS_FIXOS[chave])
+    else:
+        m = _META.fullmatch(chave)
+        if not m or m.group(1) not in _CATEGORIAS_GASTO:
+            return None
+        resultado = {"tipo": "definir_meta", "categoria": _CATEGORIAS_GASTO[m.group(1)],
+                     "limite": float(m.group(2).replace(",", "."))}
+    # Passa pelo mesmo schema do modelo, para o formato ser idêntico (floats, campos).
+    return INTENCAO.validate_python(resultado).model_dump()
+
 async def interpretar_mensagem(mensagem):
+    resultado = parse_deterministico(mensagem)
+    if resultado is not None:
+        logger.info("Interpretação: caminho=parser")
+        return resultado
+    logger.info("Interpretação: caminho=modelo")
+    return await interpretar_com_modelo(mensagem)
+
+async def interpretar_com_modelo(mensagem):
     response = await client.messages.create(
         model=MODELO_IA,
         max_tokens=400,

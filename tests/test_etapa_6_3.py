@@ -28,7 +28,7 @@ URL = "http://testserver/webhook"
 VERBOS_SINCRONOS = {"get", "post", "put", "patch", "delete", "request", "stream"}
 
 
-def post(corpo="oi", sid="SM1"):
+def post(corpo="oi, tudo bem?", sid="SM1"):
     form = {"Body": corpo, "From": "whatsapp:+5511999999999", "MessageSid": sid}
     assinatura = RequestValidator("token-de-teste").compute_signature(URL, form)
     return TestClient(main.app).post("/webhook", data=form, headers={"X-Twilio-Signature": assinatura})
@@ -175,7 +175,7 @@ def test_anthropic_que_nao_responde_levanta_apitimeouterror(servidor_mudo, monke
     monkeypatch.setattr(main, "client", lento)
     t0 = time.monotonic()
     with pytest.raises(anthropic.APITimeoutError):
-        asyncio.run(main.interpretar_mensagem("saldo"))
+        asyncio.run(main.interpretar_mensagem("saldo de março"))
     assert time.monotonic() - t0 < 3
 
 
@@ -218,7 +218,7 @@ def test_timeout_depois_da_interpretacao_tambem_e_problema_tecnico(monkeypatch):
     monkeypatch.setattr(main, "registrar_mensagem", registrar_mensagem)
     monkeypatch.setattr(main, "client", SimpleNamespace(messages=SimpleNamespace(create=create)))
     monkeypatch.setattr(main, "get", get)
-    r = post("saldo")
+    r = post("saldo de março")
     assert "técnico" in r.text and "Não entendi" not in r.text
 
 
@@ -236,7 +236,7 @@ def test_duas_interpretacoes_ao_mesmo_tempo_nao_se_serializam(monkeypatch):
 
     async def cenario():
         t0 = time.monotonic()
-        await asyncio.gather(*(main.interpretar_mensagem("oi") for _ in range(4)))
+        await asyncio.gather(*(main.interpretar_mensagem("oi, tudo bem?") for _ in range(4)))
         return time.monotonic() - t0
 
     assert asyncio.run(cenario()) < 0.4 * 4 * 0.6  # em série seriam 1,6s

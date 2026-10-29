@@ -38,7 +38,7 @@ O plano abaixo foi escrito sem ver o código. A realidade do repositório:
 - O uso de tokens (`entrada`, `saída`, `cache_escrito`, `cache_lido`) agora aparece no log de cada mensagem.
 - Testes: `tests/test_etapa_5_1.py` (pytest, sem rede). Requisição verificada com o SDK real contra um servidor local.
 - **Pendente (precisa da chave):** medir `response.usage` de verdade. Rode `ANTHROPIC_API_KEY=... python scripts/medir_usage.py` e confira `cache_creation_input_tokens > 0` na 1ª chamada e `cache_read_input_tokens > 0` nas seguintes. Ou veja a linha "Tokens:" nos logs da Render depois do deploy. Se `cache_escrito` ficar 0, o prompt está abaixo do mínimo e o `cache_control` pode ser removido.
-- A comparação Haiku sem cache vs Sonnet com cache em 30 mensagens não foi feita: o Sonnet 4.6 exige 1.024 tokens para cachear, então ele nem usaria cache com este prompt.
+- Comparação Haiku vs Sonnet 4.6 (30 mensagens): rode `ANTHROPIC_API_KEY=... python scripts/comparar_modelos.py`; ele mostra só onde tipo, valor ou categoria divergem e o uso de cache de cada modelo. Correção: antes eu escrevi aqui que o Sonnet 4.6 não cachearia com este prompt, mas isso partia de uma estimativa de tamanho que não medi. O mínimo do Sonnet 4.6 é 1.024 tokens (reconferido na doc) e o prompt mede 1.247 num dos modelos, então ele cachearia, salvo se o tokenizer do Sonnet 4.6, que gera menos tokens que o do Haiku 5.5, deixar o prompt abaixo de 1.024. O script imprime a contagem em cada modelo.
 
 ---
 

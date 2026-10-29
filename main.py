@@ -3,11 +3,12 @@ from fastapi.responses import PlainTextResponse
 from twilio.request_validator import RequestValidator
 from xml.sax.saxutils import escape
 import anthropic
-import json
 import os
 from datetime import datetime, timedelta
+from typing import Annotated, Literal, Optional, Union
 import httpx
 import logging
+from pydantic import BaseModel, Field, TypeAdapter, ValidationError
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -222,7 +223,7 @@ def remover_lembrete(telefone, descricao):
 # IA
 # ============================================================
 SYSTEM_PROMPT = """Você é um assistente financeiro pessoal via WhatsApp chamado Paylo.IA 🐒.
-Responda APENAS com JSON válido, sem markdown, sem explicações.
+Identifique a intenção da mensagem do usuário, entre as 16 abaixo.
 
 1. REGISTRAR GASTO (ex: "uber 27", "mercado 150 débito", "almoço 35 pix"):
 {"tipo": "gasto", "descricao": "descrição", "valor": 27.0, "categoria": "Transporte", "forma_pagamento": "não informado"}
@@ -276,7 +277,112 @@ Períodos: hoje, semana, mes
 {"tipo": "ajuda"}"""
 
 class ErroInterpretacao(Exception):
-    """O modelo respondeu algo que não dá para usar (JSON inválido ou sem 'tipo')."""
+    """O modelo respondeu algo que não dá para usar (fora do schema, recusa ou cortado)."""
+
+# Uma classe por intenção do SYSTEM_PROMPT; o campo `tipo` escolhe a classe.
+# Todos os campos são obrigatórios: a API só aceita até 24 parâmetros opcionais no schema.
+Periodo = Literal["hoje", "semana", "mes"]
+
+class Gasto(BaseModel):
+    tipo: Literal["gasto"]
+    descricao: str
+    valor: float
+    categoria: str
+    forma_pagamento: str
+
+class Receita(BaseModel):
+    tipo: Literal["receita"]
+    descricao: str
+    valor: float
+    categoria: str
+
+class Relatorio(BaseModel):
+    tipo: Literal["relatorio"]
+    periodo: Periodo
+
+class RelatorioPagamento(BaseModel):
+    tipo: Literal["relatorio_pagamento"]
+    forma: str
+    periodo: Periodo
+
+class Saldo(BaseModel):
+    tipo: Literal["saldo"]
+    periodo: Periodo
+
+class Comparativo(BaseModel):
+    tipo: Literal["comparativo"]
+
+class DefinirMeta(BaseModel):
+    tipo: Literal["definir_meta"]
+    categoria: str
+    limite: float
+
+class VerMetas(BaseModel):
+    tipo: Literal["ver_metas"]
+
+class AdicionarLembrete(BaseModel):
+    tipo: Literal["adicionar_lembrete"]
+    descricao: str
+    valor: float
+    dia_vencimento: int = Field(ge=1, le=31)
+
+class VerLembretes(BaseModel):
+    tipo: Literal["ver_lembretes"]
+
+class RemoverLembrete(BaseModel):
+    tipo: Literal["remover_lembrete"]
+    descricao: str
+
+class RemoverUltimo(BaseModel):
+    tipo: Literal["remover_ultimo"]
+
+class RemoverItem(BaseModel):
+    tipo: Literal["remover_item"]
+    descricao: str
+
+class RemoverCategoria(BaseModel):
+    tipo: Literal["remover_categoria"]
+    categoria: str
+    valor: Optional[float]
+
+class Historico(BaseModel):
+    tipo: Literal["historico"]
+
+class Ajuda(BaseModel):
+    tipo: Literal["ajuda"]
+
+Intencao = Annotated[
+    Union[
+        Gasto, Receita, Relatorio, RelatorioPagamento, Saldo, Comparativo, DefinirMeta,
+        VerMetas, AdicionarLembrete, VerLembretes, RemoverLembrete, RemoverUltimo,
+        RemoverItem, RemoverCategoria, Historico, Ajuda,
+    ],
+    Field(discriminator="tipo"),
+]
+INTENCAO = TypeAdapter(Intencao)
+
+def _simplificar_schema(no, defs=None):
+    """Deixa o schema do Pydantic no que a API aceita.
+
+    Troca cada `$ref` pela definição (a API recusa `$defs` junto de `anyOf`), tira o `discriminator`
+    e os `title` (ruído) e troca `const` por `enum` (o SDK descarta `const` em silêncio).
+    """
+    if isinstance(no, dict):
+        if defs is None:
+            defs = no.get("$defs", {})
+        if "$ref" in no:
+            return _simplificar_schema(defs[no["$ref"].removeprefix("#/$defs/")], defs)
+        no = {k: _simplificar_schema(v, defs) for k, v in no.items()
+              if k not in ("$defs", "discriminator") and not (k == "title" and isinstance(v, str))}
+        if "const" in no:
+            no["enum"] = [no.pop("const")]
+    elif isinstance(no, list):
+        no = [_simplificar_schema(v, defs) for v in no]
+    return no
+
+# O Pydantic gera oneOf + discriminator + $defs; depois de achatar, `transform_schema` troca oneOf
+# por anyOf e põe additionalProperties=false em cada objeto.
+SCHEMA_INTENCAO = anthropic.transform_schema(_simplificar_schema(INTENCAO.json_schema()))
 
 MODELO_IA = "claude-haiku-5-5"
 
@@ -289,6 +395,7 @@ def interpretar_mensagem(mensagem):
         thinking={"type": "disabled"},
         # Bloco estático com cache: o prompt precisa passar de 512 tokens (mínimo do Haiku 5.5).
         system=[{"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
+        output_config={"format": {"type": "json_schema", "schema": SCHEMA_INTENCAO}},
         messages=[{"role": "user", "content": mensagem}]
     )
     usage = response.usage
@@ -296,18 +403,15 @@ def interpretar_mensagem(mensagem):
         f"Tokens: entrada={usage.input_tokens} saída={usage.output_tokens} "
         f"cache_escrito={usage.cache_creation_input_tokens} cache_lido={usage.cache_read_input_tokens}"
     )
-    texto = next((b.text for b in response.content if b.type == "text"), "").strip()
-    if texto.startswith("```"):
-        texto = texto.split("```")[1]
-        if texto.startswith("json"):
-            texto = texto[4:]
+    # Com saída estruturada o JSON vem puro; só recusa e corte por max_tokens escapam do schema.
+    stop_reason = getattr(response, "stop_reason", None)
+    if stop_reason in ("refusal", "max_tokens"):
+        raise ErroInterpretacao(f"Resposta não aproveitável (stop_reason={stop_reason})")
+    texto = next((b.text for b in response.content if b.type == "text"), "")
     try:
-        resultado = json.loads(texto.strip())
-    except json.JSONDecodeError as e:
-        raise ErroInterpretacao(f"JSON inválido do modelo: {texto[:200]!r}") from e
-    if not isinstance(resultado, dict) or "tipo" not in resultado:
-        raise ErroInterpretacao(f"Resposta sem 'tipo': {resultado!r}")
-    return resultado
+        return INTENCAO.validate_json(texto).model_dump()
+    except ValidationError as e:
+        raise ErroInterpretacao(f"Resposta fora do schema: {texto[:200]!r}") from e
 
 # ============================================================
 # RELATÓRIOS

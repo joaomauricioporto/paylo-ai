@@ -5,7 +5,7 @@ Uma etapa por sessão, sempre em uma branch. Ao terminar uma etapa, marque aqui 
 ## Progresso
 
 - [x] 5.1 SDK, modelo Haiku e cache do prompt (branch `etapa-5-1`, ver "Resultado da 5.1" abaixo)
-- [ ] 5.2 Saída estruturada
+- [x] 5.2 Saída estruturada (branch `etapa-5-2`, ver "Resultado da 5.2" abaixo; validada com a API real)
 - [ ] 6.3 Async com timeouts
 - [ ] 6.4 Corrida nas remoções
 - [ ] 6.1 Parser determinístico antes do modelo
@@ -39,6 +39,16 @@ O plano abaixo foi escrito sem ver o código. A realidade do repositório:
 - Testes: `tests/test_etapa_5_1.py` (pytest, sem rede). Requisição verificada com o SDK real contra um servidor local.
 - **Decisão (2026-10-28): produção fica com Haiku 5.5 + cache.** Medido com chave real: o cache funcionou no Haiku (`cache_escrito` na 1ª chamada, `cache_lido` nas seguintes). Em 30 mensagens os dois modelos divergiram só em 1 ("comprei remédio 23 e 50": Haiku 23,50, Sonnet 73,00) e o Haiku acertou. O Sonnet 4.6 não cacheia com este prompt (899 tokens no tokenizer dele, mínimo 1.024; no Haiku 5.5 o prompt mede 1.247, mínimo 512), então seria mais caro e mais lento. Se o prompt crescer, lembre que o limite do Sonnet é outro.
 - Comparação feita com `scripts/comparar_modelos.py` (resultado na decisão acima). A estimativa inicial de 700 a 900 tokens era para o Sonnet; o Haiku 5.5 conta mais tokens para o mesmo texto.
+
+## Resultado da 5.2
+
+- Conferido na documentação (platform.claude.com, structured outputs) em 2026-10-28: forma recomendada é `output_config={"format": {"type": "json_schema", "schema": ...}}` (o parâmetro antigo `output_format` está obsoleto em `create()`). `claude-haiku-5-5` está na lista de modelos aceitos. A doc **não diz** se funciona com `thinking` desativado, e o cache do system não é afetado enquanto o schema não mudar (mudar `output_config.format` invalida o cache); o `validar_schema.py` é quem confirma na prática.
+- Schema: a doc lista `anyOf` como aceito e **não menciona `oneOf` nem `discriminator`**. O Pydantic gera `oneOf` + `discriminator`, então `main.py` converte: `anthropic.transform_schema` troca `oneOf` por `anyOf` e põe `additionalProperties: false`; antes disso `_simplificar_schema` tira o `discriminator` e troca `const` por `enum` (o SDK descarta `const` em silêncio). **1ª execução com chave real: 400 "For 'anyOf', '$defs' is not supported"** (a doc não menciona essa regra, a API sim). Correção: `_simplificar_schema` resolve todo `$ref` dentro do próprio `anyOf` e remove `$defs` (e os `title`), então o schema enviado não tem `$defs` nem `$ref`; teste sem rede garante isso. Limites da doc respeitados: nenhum parâmetro opcional (máx. 24) e só 1 parâmetro com união (`remover_categoria.valor`, máx. 16).
+- Garantia de JSON puro: a doc diz que a decodificação é restrita pela gramática ("Always valid"), com exceções `refusal` e `max_tokens`. Por isso a limpeza de cercas de markdown saiu; `refusal` e `max_tokens` viram `ErroInterpretacao`. A doc avisa que a capitalização de `enum`/`const` não é garantida (em geral só a primeira letra após espaço; os valores daqui não têm espaço).
+- `SYSTEM_PROMPT`: saiu só a linha "Responda APENAS com JSON válido, sem markdown" (a API já injeta a instrução do formato). Os exemplos de JSON ficam, pois documentam os campos. O prompt muda, então o cache é reescrito uma vez.
+- `interpretar_mensagem` valida com `TypeAdapter` da união e devolve `model_dump()`, o mesmo dict de antes. Campos extras são descartados; campos faltando, tipo desconhecido, `periodo` fora de hoje/semana/mes e `dia_vencimento` fora de 1 a 31 levantam `ErroInterpretacao` ("Não entendi"). Categoria e forma de pagamento seguem texto livre, como antes.
+- Testes: `tests/test_etapa_5_2.py` (sem rede). O teste da 5.1 sobre cerca de markdown foi trocado por um que garante que cerca levanta `ErroInterpretacao`. `pydantic==2.12.5` entrou em `requirements.txt` (já vinha pelo `fastapi`, agora está fixo).
+- **Validação com a API real passou** (2026-10-28, `scripts/validar_schema.py`): schema aceito e 18 de 18 intenções batendo, com `thinking` desativado e cache no system. O cache com o schema tem 3.520 tokens. O plano B (objeto raiz com campo `intencao`) não foi preciso.
 
 ---
 

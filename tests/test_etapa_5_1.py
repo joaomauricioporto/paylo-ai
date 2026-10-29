@@ -79,9 +79,11 @@ def test_le_o_texto_mesmo_com_bloco_de_thinking_antes(falso):
     assert main.interpretar_mensagem("oi") == {"tipo": "ajuda"}
 
 
-def test_json_em_cerca_de_markdown_ainda_funciona(falso):
+def test_json_em_cerca_de_markdown_levanta_erro_de_interpretacao(falso):
+    # Desde a 5.2 a API devolve JSON puro, então a cerca de markdown deixou de ser aceita.
     falso.resp = resposta('```json\n{"tipo": "saldo", "periodo": "mes"}\n```')
-    assert main.interpretar_mensagem("saldo")["tipo"] == "saldo"
+    with pytest.raises(main.ErroInterpretacao):
+        main.interpretar_mensagem("saldo")
 
 
 def test_json_invalido_vira_erro_de_interpretacao(falso):

@@ -57,14 +57,14 @@ def falso(monkeypatch):
     return f
 
 
-def post(corpo="oi", sid="SM1"):
+def post(corpo="oi, tudo bem?", sid="SM1"):
     form = {"Body": corpo, "From": "whatsapp:+5511999999999", "MessageSid": sid}
     assinatura = RequestValidator("token-de-teste").compute_signature(URL, form)
     return TestClient(main.app).post("/webhook", data=form, headers={"X-Twilio-Signature": assinatura})
 
 
 def test_pedido_usa_haiku_cache_e_sem_thinking(falso):
-    assert asyncio.run(main.interpretar_mensagem("saldo")) == {"tipo": "ajuda"}
+    assert asyncio.run(main.interpretar_mensagem("saldo de março")) == {"tipo": "ajuda"}
     pedido = falso.chamadas[0]
     assert pedido["model"] == "claude-haiku-5-5"
     assert pedido["thinking"] == {"type": "disabled"}
@@ -77,20 +77,20 @@ def test_pedido_usa_haiku_cache_e_sem_thinking(falso):
 def test_uso_de_tokens_vai_para_o_log(falso, caplog):
     falso.resp = resposta('{"tipo": "ajuda"}', cache_creation_input_tokens=1100)
     with caplog.at_level(logging.INFO):
-        asyncio.run(main.interpretar_mensagem("saldo"))
+        asyncio.run(main.interpretar_mensagem("saldo de março"))
     assert "cache_escrito=1100" in caplog.text
 
 
 def test_le_o_texto_mesmo_com_bloco_de_thinking_antes(falso):
     falso.resp.content.insert(0, SimpleNamespace(type="thinking", thinking=""))
-    assert asyncio.run(main.interpretar_mensagem("oi")) == {"tipo": "ajuda"}
+    assert asyncio.run(main.interpretar_mensagem("oi, tudo bem?")) == {"tipo": "ajuda"}
 
 
 def test_json_em_cerca_de_markdown_levanta_erro_de_interpretacao(falso):
     # Desde a 5.2 a API devolve JSON puro, então a cerca de markdown deixou de ser aceita.
     falso.resp = resposta('```json\n{"tipo": "saldo", "periodo": "mes"}\n```')
     with pytest.raises(main.ErroInterpretacao):
-        asyncio.run(main.interpretar_mensagem("saldo"))
+        asyncio.run(main.interpretar_mensagem("saldo de março"))
 
 
 def test_json_invalido_vira_erro_de_interpretacao(falso):
@@ -100,7 +100,7 @@ def test_json_invalido_vira_erro_de_interpretacao(falso):
 
 
 def test_webhook_assinatura_invalida_403(falso):
-    r = TestClient(main.app).post("/webhook", data={"Body": "oi", "From": "x", "MessageSid": "S"},
+    r = TestClient(main.app).post("/webhook", data={"Body": "oi, tudo bem?", "From": "x", "MessageSid": "S"},
                                   headers={"X-Twilio-Signature": "errada"})
     assert r.status_code == 403
     assert falso.chamadas == []

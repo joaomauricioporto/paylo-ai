@@ -76,7 +76,7 @@ def falso(monkeypatch):
     return f
 
 
-def post(corpo="oi", sid="SM1"):
+def post(corpo="oi, tudo bem?", sid="SM1"):
     form = {"Body": corpo, "From": "whatsapp:+5511999999999", "MessageSid": sid}
     assinatura = RequestValidator("token-de-teste").compute_signature(URL, form)
     return TestClient(main.app).post("/webhook", data=form, headers={"X-Twilio-Signature": assinatura})
@@ -95,7 +95,7 @@ def test_intencao_valida_devolve_o_mesmo_dict(falso, esperado):
 
 
 def test_pedido_leva_o_schema_e_mantem_haiku_cache_e_sem_thinking(falso):
-    asyncio.run(main.interpretar_mensagem("saldo"))
+    asyncio.run(main.interpretar_mensagem("saldo de março"))
     pedido = falso.chamadas[0]
     assert pedido["output_config"] == {"format": {"type": "json_schema", "schema": main.SCHEMA_INTENCAO}}
     enviado = json.dumps(pedido["output_config"])
@@ -156,12 +156,12 @@ def test_resposta_fora_do_schema_levanta_erro_de_interpretacao(falso, texto):
 def test_recusa_ou_corte_levanta_erro_de_interpretacao(falso, stop_reason):
     falso.resp = resposta('{"tipo": "ajuda"}', stop_reason=stop_reason)
     with pytest.raises(main.ErroInterpretacao):
-        asyncio.run(main.interpretar_mensagem("oi"))
+        asyncio.run(main.interpretar_mensagem("oi, tudo bem?"))
 
 
 def test_campo_extra_e_descartado(falso):
     falso.resp = resposta('{"tipo": "saldo", "periodo": "mes", "extra": 1}')
-    assert asyncio.run(main.interpretar_mensagem("saldo")) == {"tipo": "saldo", "periodo": "mes"}
+    assert asyncio.run(main.interpretar_mensagem("saldo de março")) == {"tipo": "saldo", "periodo": "mes"}
 
 
 @pytest.fixture
@@ -184,7 +184,7 @@ def test_webhook_json_fora_do_schema_diz_nao_entendi(webhook, texto):
 
 def test_webhook_com_resposta_valida_segue_o_fluxo_normal(webhook):
     webhook.resp = resposta('{"tipo": "ajuda"}')
-    r = post("ajuda")
+    r = post("ajuda aqui")
     assert main.MENSAGEM_AJUDA.splitlines()[0] in r.text
 
 

@@ -8,7 +8,7 @@ Uma etapa por sessão, sempre em uma branch. Ao terminar uma etapa, marque aqui 
 - [x] 5.2 Saída estruturada (branch `etapa-5-2`, ver "Resultado da 5.2" abaixo; validada com a API real)
 - [x] 6.3 Async com timeouts (branch `etapa-6-3`, ver "Resultado da 6.3" abaixo; validada com a API real)
 - [x] 6.4 Corrida nas remoções (branch `etapa-6-4`, ver "Resultado da 6.4" abaixo; **falta rodar `sql/002_remover_ultimo.sql` no Supabase antes do merge**)
-- [ ] 6.1 Parser determinístico antes do modelo
+- [x] 6.1 Parser determinístico antes do modelo (branch `etapa-6-1`, ver "Resultado da 6.1" abaixo; `scripts/comparar_parser.py` com a API real: zero divergências, merge liberado)
 - [ ] 6.2 Registro do tipo de intenção
 - [ ] 6.5 Fila no webhook
 
@@ -75,6 +75,15 @@ O plano abaixo foi escrito sem ver o código. A realidade do repositório:
 # Plano original (Gemini)
 
 ---
+
+## Resultado da 6.1
+
+- `parse_deterministico(texto)` em `main.py`: normaliza (minúsculas, sem acento, espaços únicos) e só aceita frase inteira igual à lista; qualquer outra coisa devolve `None` e o modelo decide como antes. O resultado passa pelo mesmo `INTENCAO` do modelo, então o dict tem o mesmo formato.
+- Coberto: ajuda (oi, ola, ajuda), saldo/quanto tenho/quanto sobrou (periodo `mes`), comparativo, ver_metas, ver_lembretes, historico (ultimos gastos), remover_ultimo (remover ultimo, desfazer) e definir_meta (`meta|limite|definir meta` + categoria da lista + número simples; `1.500` fica para o modelo).
+- Fora de propósito: gasto, receita, relatórios, lembretes, remover_item/categoria (categoria, descrição e forma de pagamento dependem de julgamento do modelo).
+- `interpretar_mensagem` chama o parser e só então `interpretar_com_modelo` (o código antigo, renomeado); o log diz `caminho=parser` ou `caminho=modelo`.
+- Testes: `tests/test_etapa_6_1.py`. Os testes antigos que usavam "oi"/"saldo" para exercitar o modelo passaram a usar "oi, tudo bem?"/"saldo de março".
+- Validada com a API real: `scripts/comparar_parser.py` deu `RESULTADO: OK`, zero divergências (rodado pelo João).
 
 ## Etapa 5.1: Atualização do SDK Anthropic, Modelo Haiku e Prompt Caching
 

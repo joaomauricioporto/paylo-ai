@@ -1,8 +1,10 @@
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, Form, BackgroundTasks, HTTPException, Request
 from fastapi.responses import PlainTextResponse
 from twilio.request_validator import RequestValidator
 from xml.sax.saxutils import escape
 import anthropic
+import asyncio
 import os
 from datetime import datetime, timedelta
 from typing import Annotated, Literal, Optional, Union
@@ -13,13 +15,18 @@ from pydantic import BaseModel, Field, TypeAdapter, ValidationError
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = FastAPI()
-
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
 
-client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+# Timeouts explícitos: a Twilio desiste do webhook em 15s, então nada pode ficar pendurado.
+# O SDK da Anthropic usa httpx2 por dentro e recusa `httpx.Timeout`; por isso `anthropic.Timeout`.
+# Sem retentativas: depois de um timeout de 10s, repetir estouraria o prazo da Twilio.
+TIMEOUT_ANTHROPIC = anthropic.Timeout(10.0, connect=3.0)
+TIMEOUT_SUPABASE = httpx.Timeout(5.0, connect=3.0)
+TEMPO_MAX_SUPABASE = 5.0  # teto por chamada (asyncio.wait_for), além dos timeouts por fase do httpx
+
+client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY, timeout=TIMEOUT_ANTHROPIC, max_retries=0)
 SUPABASE_API = f"{SUPABASE_URL}/rest/v1"
 
 # Twilio: o token serve para provar que o webhook veio mesmo da Twilio
@@ -36,21 +43,45 @@ HEADERS = {
     "Prefer": "return=representation"
 }
 
+_db = None
+
+def db():
+    """Cliente HTTP assíncrono do Supabase, criado no primeiro uso e fechado no desligamento."""
+    global _db
+    if _db is None:
+        _db = httpx.AsyncClient(timeout=TIMEOUT_SUPABASE)
+    return _db
+
+@asynccontextmanager
+async def lifespan(app):
+    global _db
+    yield
+    if _db is not None:
+        await _db.aclose()
+        _db = None
+    await client.close()
+
+app = FastAPI(lifespan=lifespan)
+
 # ============================================================
 # HELPERS
 # ============================================================
-def get(url, params=None):
-    r = httpx.get(url, headers=HEADERS, params=params)
+async def requisitar(metodo, url, **kwargs):
+    """Uma chamada ao Supabase com teto de tempo. Estouro = asyncio.TimeoutError (erro de infraestrutura)."""
+    return await asyncio.wait_for(db().request(metodo, url, headers=HEADERS, **kwargs), TEMPO_MAX_SUPABASE)
+
+async def get(url, params=None):
+    r = await requisitar("GET", url, params=params)
     r.raise_for_status()
     return r.json()
 
-def post(url, data):
-    r = httpx.post(url, headers=HEADERS, json=data)
+async def post(url, data):
+    r = await requisitar("POST", url, json=data)
     r.raise_for_status()
     return r.json()
 
-def delete(url, params):
-    httpx.delete(url, headers=HEADERS, params=params)
+async def delete(url, params):
+    await requisitar("DELETE", url, params=params)
 
 def url_publica(request):
     """URL que a Twilio assinou. Atrás do proxy da Render o esquema pode chegar como http."""
@@ -67,13 +98,15 @@ def assinatura_valida(request, form):
     assinatura = request.headers.get("X-Twilio-Signature", "")
     return validator.validate(url_publica(request), form, assinatura)
 
-def registrar_mensagem(message_sid, telefone):
+async def registrar_mensagem(message_sid, telefone):
     """Guarda o MessageSid. True = mensagem nova; False = já processada (reenvio da Twilio)."""
-    r = httpx.post(
-        f"{SUPABASE_API}/mensagens_processadas",
-        headers={**HEADERS, "Prefer": "return=minimal"},
-        json={"message_sid": message_sid, "telefone": telefone},
-        timeout=10,
+    r = await asyncio.wait_for(
+        db().post(
+            f"{SUPABASE_API}/mensagens_processadas",
+            headers={**HEADERS, "Prefer": "return=minimal"},
+            json={"message_sid": message_sid, "telefone": telefone},
+        ),
+        TEMPO_MAX_SUPABASE,
     )
     if r.status_code == 409:  # chave primária repetida
         return False
@@ -89,7 +122,7 @@ def filtro_mes(hoje, offset=0):
         ano -= 1
     return f"{ano}-{mes:02d}"
 
-def buscar_gastos_periodo(telefone, periodo="mes"):
+async def buscar_gastos_periodo(telefone, periodo="mes"):
     hoje = datetime.now()
     url = f"{SUPABASE_API}/gastos"
     if periodo == "hoje":
@@ -99,49 +132,49 @@ def buscar_gastos_periodo(telefone, periodo="mes"):
         params = {"telefone": f"eq.{telefone}", "data": f"gte.{inicio}", "order": "id.desc"}
     else:
         params = {"telefone": f"eq.{telefone}", "data": f"like.{filtro_mes(hoje)}%25", "order": "id.desc"}
-    return get(url, params)
+    return await get(url, params)
 
-def buscar_gastos_mes_offset(telefone, offset=0):
+async def buscar_gastos_mes_offset(telefone, offset=0):
     """Busca gastos de um mês específico. offset=0 = mês atual, offset=1 = mês passado."""
     hoje = datetime.now()
     prefixo = filtro_mes(hoje, offset)
     url = f"{SUPABASE_API}/gastos"
     params = {"telefone": f"eq.{telefone}", "data": f"like.{prefixo}%25", "order": "id.desc"}
-    return get(url, params)
+    return await get(url, params)
 
 # ============================================================
 # GASTOS
 # ============================================================
-def salvar_gasto(descricao, valor, categoria, forma_pagamento, telefone):
+async def salvar_gasto(descricao, valor, categoria, forma_pagamento, telefone):
     data = {
         "data": datetime.now().strftime("%Y-%m-%d %H:%M"),
         "descricao": descricao, "valor": valor,
         "categoria": categoria, "forma_pagamento": forma_pagamento,
         "telefone": telefone
     }
-    resultado = post(f"{SUPABASE_API}/gastos", data)
+    resultado = await post(f"{SUPABASE_API}/gastos", data)
     return resultado[0]["id"] if resultado else "?"
 
-def remover_ultimo_gasto(telefone):
+async def remover_ultimo_gasto(telefone):
     url = f"{SUPABASE_API}/gastos"
-    gastos = get(url, {"telefone": f"eq.{telefone}", "order": "id.desc", "limit": "1"})
+    gastos = await get(url, {"telefone": f"eq.{telefone}", "order": "id.desc", "limit": "1"})
     if not gastos: return None
     gasto = gastos[0]
-    delete(url, {"id": f"eq.{gasto['id']}"})
+    await delete(url, {"id": f"eq.{gasto['id']}"})
     return gasto
 
-def remover_gasto_por_descricao(telefone, descricao):
+async def remover_gasto_por_descricao(telefone, descricao):
     url = f"{SUPABASE_API}/gastos"
-    gastos = get(url, {"telefone": f"eq.{telefone}", "order": "id.desc", "limit": "50"})
+    gastos = await get(url, {"telefone": f"eq.{telefone}", "order": "id.desc", "limit": "50"})
     filtrados = [g for g in gastos if descricao.lower() in g.get("descricao", "").lower()]
     if not filtrados: return None
     gasto = filtrados[0]
-    delete(url, {"id": f"eq.{gasto['id']}"})
+    await delete(url, {"id": f"eq.{gasto['id']}"})
     return gasto
 
-def remover_gasto_por_categoria(telefone, categoria, valor=None):
+async def remover_gasto_por_categoria(telefone, categoria, valor=None):
     url = f"{SUPABASE_API}/gastos"
-    gastos = get(url, {"telefone": f"eq.{telefone}", "order": "id.desc", "limit": "50"})
+    gastos = await get(url, {"telefone": f"eq.{telefone}", "order": "id.desc", "limit": "50"})
     filtrados = [g for g in gastos if categoria.lower() in g.get("categoria", "").lower()]
     if not filtrados: return None
     if valor:
@@ -150,25 +183,25 @@ def remover_gasto_por_categoria(telefone, categoria, valor=None):
         gasto = por_valor[0]
     else:
         gasto = filtrados[0]
-    delete(url, {"id": f"eq.{gasto['id']}"})
+    await delete(url, {"id": f"eq.{gasto['id']}"})
     return gasto
 
-def listar_ultimos_gastos(telefone, limite=5):
-    return get(f"{SUPABASE_API}/gastos", {"telefone": f"eq.{telefone}", "order": "id.desc", "limit": str(limite)})
+async def listar_ultimos_gastos(telefone, limite=5):
+    return await get(f"{SUPABASE_API}/gastos", {"telefone": f"eq.{telefone}", "order": "id.desc", "limit": str(limite)})
 
 # ============================================================
 # RECEITAS
 # ============================================================
-def salvar_receita(descricao, valor, categoria, telefone):
+async def salvar_receita(descricao, valor, categoria, telefone):
     data = {
         "data": datetime.now().strftime("%Y-%m-%d %H:%M"),
         "descricao": descricao, "valor": valor,
         "categoria": categoria, "telefone": telefone
     }
-    resultado = post(f"{SUPABASE_API}/receitas", data)
+    resultado = await post(f"{SUPABASE_API}/receitas", data)
     return resultado[0]["id"] if resultado else "?"
 
-def buscar_receitas_periodo(telefone, periodo="mes"):
+async def buscar_receitas_periodo(telefone, periodo="mes"):
     hoje = datetime.now()
     url = f"{SUPABASE_API}/receitas"
     if periodo == "hoje":
@@ -178,45 +211,45 @@ def buscar_receitas_periodo(telefone, periodo="mes"):
         params = {"telefone": f"eq.{telefone}", "data": f"gte.{inicio}", "order": "id.desc"}
     else:
         params = {"telefone": f"eq.{telefone}", "data": f"like.{filtro_mes(datetime.now())}%25", "order": "id.desc"}
-    return get(url, params)
+    return await get(url, params)
 
 # ============================================================
 # METAS
 # ============================================================
-def salvar_meta(telefone, categoria, limite):
+async def salvar_meta(telefone, categoria, limite):
     url = f"{SUPABASE_API}/metas"
     # Verifica se já existe meta para essa categoria
-    existentes = get(url, {"telefone": f"eq.{telefone}", "order": "id.desc", "limit": "50"})
+    existentes = await get(url, {"telefone": f"eq.{telefone}", "order": "id.desc", "limit": "50"})
     for m in existentes:
         if categoria.lower() in m.get("categoria", "").lower():
             # Atualiza
-            httpx.patch(url, headers=HEADERS, params={"id": f"eq.{m['id']}"}, json={"limite": limite})
+            await requisitar("PATCH", url, params={"id": f"eq.{m['id']}"}, json={"limite": limite})
             return "atualizada"
     data = {"telefone": telefone, "categoria": categoria, "limite": limite}
-    post(url, data)
+    await post(url, data)
     return "criada"
 
-def buscar_metas(telefone):
-    return get(f"{SUPABASE_API}/metas", {"telefone": f"eq.{telefone}", "order": "categoria.asc"})
+async def buscar_metas(telefone):
+    return await get(f"{SUPABASE_API}/metas", {"telefone": f"eq.{telefone}", "order": "categoria.asc"})
 
 # ============================================================
 # LEMBRETES
 # ============================================================
-def salvar_lembrete(telefone, descricao, valor, dia_vencimento):
+async def salvar_lembrete(telefone, descricao, valor, dia_vencimento):
     data = {"telefone": telefone, "descricao": descricao, "valor": valor, "dia_vencimento": dia_vencimento}
-    resultado = post(f"{SUPABASE_API}/lembretes", data)
+    resultado = await post(f"{SUPABASE_API}/lembretes", data)
     return resultado[0]["id"] if resultado else "?"
 
-def buscar_lembretes(telefone):
-    return get(f"{SUPABASE_API}/lembretes", {"telefone": f"eq.{telefone}", "order": "dia_vencimento.asc"})
+async def buscar_lembretes(telefone):
+    return await get(f"{SUPABASE_API}/lembretes", {"telefone": f"eq.{telefone}", "order": "dia_vencimento.asc"})
 
-def remover_lembrete(telefone, descricao):
+async def remover_lembrete(telefone, descricao):
     url = f"{SUPABASE_API}/lembretes"
-    lembretes = get(url, {"telefone": f"eq.{telefone}", "order": "id.desc", "limit": "50"})
+    lembretes = await get(url, {"telefone": f"eq.{telefone}", "order": "id.desc", "limit": "50"})
     filtrados = [l for l in lembretes if descricao.lower() in l.get("descricao", "").lower()]
     if not filtrados: return None
     lembrete = filtrados[0]
-    delete(url, {"id": f"eq.{lembrete['id']}"})
+    await delete(url, {"id": f"eq.{lembrete['id']}"})
     return lembrete
 
 # ============================================================
@@ -386,8 +419,8 @@ SCHEMA_INTENCAO = anthropic.transform_schema(_simplificar_schema(INTENCAO.json_s
 
 MODELO_IA = "claude-haiku-5-5"
 
-def interpretar_mensagem(mensagem):
-    response = client.messages.create(
+async def interpretar_mensagem(mensagem):
+    response = await client.messages.create(
         model=MODELO_IA,
         max_tokens=400,
         # Haiku 5.5 pensa por padrão; para classificar a mensagem não é preciso
@@ -416,8 +449,8 @@ def interpretar_mensagem(mensagem):
 # ============================================================
 # RELATÓRIOS
 # ============================================================
-def gerar_relatorio(telefone, periodo):
-    gastos = buscar_gastos_periodo(telefone, periodo)
+async def gerar_relatorio(telefone, periodo):
+    gastos = await buscar_gastos_periodo(telefone, periodo)
     if not gastos:
         nomes = {"hoje": "hoje", "semana": "nos últimos 7 dias", "mes": "este mês"}
         return f"📭 Nenhum gasto registrado {nomes.get(periodo, 'neste período')}."
@@ -432,7 +465,7 @@ def gerar_relatorio(telefone, periodo):
     linhas.append(f"\n💰 *Total: R$ {total:.2f}*")
 
     # Verifica metas
-    metas = buscar_metas(telefone)
+    metas = await buscar_metas(telefone)
     alertas = []
     for meta in metas:
         cat = meta["categoria"]
@@ -447,8 +480,8 @@ def gerar_relatorio(telefone, periodo):
         linhas.append("\n" + "\n".join(alertas))
     return "\n".join(linhas)
 
-def gerar_relatorio_pagamento(telefone, forma, periodo):
-    todos = buscar_gastos_periodo(telefone, periodo)
+async def gerar_relatorio_pagamento(telefone, forma, periodo):
+    todos = await buscar_gastos_periodo(telefone, periodo)
     gastos = [g for g in todos if forma.lower() in g.get("forma_pagamento", "").lower()]
     nomes = {"hoje": "hoje", "semana": "nos últimos 7 dias", "mes": "este mês"}
     if not gastos:
@@ -464,9 +497,9 @@ def gerar_relatorio_pagamento(telefone, forma, periodo):
     linhas.append(f"\n💰 *Total no {forma}: R$ {total:.2f}*")
     return "\n".join(linhas)
 
-def gerar_saldo(telefone, periodo):
-    gastos = buscar_gastos_periodo(telefone, periodo)
-    receitas = buscar_receitas_periodo(telefone, periodo)
+async def gerar_saldo(telefone, periodo):
+    gastos = await buscar_gastos_periodo(telefone, periodo)
+    receitas = await buscar_receitas_periodo(telefone, periodo)
     total_gastos = sum(g["valor"] for g in gastos)
     total_receitas = sum(r["valor"] for r in receitas)
     saldo = total_receitas - total_gastos
@@ -482,10 +515,10 @@ def gerar_saldo(telefone, periodo):
         linhas.append("\n💡 Dica: registre suas receitas com 'recebi salário 3000'")
     return "\n".join(linhas)
 
-def gerar_comparativo(telefone):
+async def gerar_comparativo(telefone):
     hoje = datetime.now()
-    gastos_atual = buscar_gastos_mes_offset(telefone, 0)
-    gastos_passado = buscar_gastos_mes_offset(telefone, 1)
+    gastos_atual = await buscar_gastos_mes_offset(telefone, 0)
+    gastos_passado = await buscar_gastos_mes_offset(telefone, 1)
 
     total_atual = sum(g["valor"] for g in gastos_atual)
     total_passado = sum(g["valor"] for g in gastos_passado)
@@ -521,11 +554,11 @@ def gerar_comparativo(telefone):
             linhas.append(f"  {cat}: R$ {v_atual:.2f} {sinal}")
     return "\n".join(linhas)
 
-def gerar_ver_metas(telefone):
-    metas = buscar_metas(telefone)
+async def gerar_ver_metas(telefone):
+    metas = await buscar_metas(telefone)
     if not metas:
         return "📭 Nenhuma meta definida.\n\n💡 Defina uma com: 'meta alimentação 500'"
-    gastos = buscar_gastos_mes_offset(telefone, 0)
+    gastos = await buscar_gastos_mes_offset(telefone, 0)
     por_cat = {}
     for g in gastos:
         por_cat[g["categoria"]] = por_cat.get(g["categoria"], 0) + g["valor"]
@@ -543,8 +576,8 @@ def gerar_ver_metas(telefone):
         linhas.append(f"  R$ {gasto:.2f} / R$ {limite:.2f}\n")
     return "\n".join(linhas)
 
-def gerar_ver_lembretes(telefone):
-    lembretes = buscar_lembretes(telefone)
+async def gerar_ver_lembretes(telefone):
+    lembretes = await buscar_lembretes(telefone)
     if not lembretes:
         return "📭 Nenhum lembrete cadastrado.\n\n💡 Adicione com: 'lembrete aluguel 1200 dia 5'"
     hoje = datetime.now().day
@@ -568,8 +601,8 @@ def gerar_ver_lembretes(telefone):
         linhas.append(f"{emoji} *{desc}* — R$ {valor:.2f} ({aviso})")
     return "\n".join(linhas)
 
-def gerar_historico(telefone):
-    gastos = listar_ultimos_gastos(telefone)
+async def gerar_historico(telefone):
+    gastos = await listar_ultimos_gastos(telefone)
     if not gastos:
         return "📭 Nenhum gasto registrado ainda."
     linhas = ["🧾 *Últimos gastos:*\n"]
@@ -625,22 +658,22 @@ async def webhook(request: Request, Body: str = Form(...), From: str = Form(...)
     logger.info(f"Mensagem de {telefone}: {mensagem}")
 
     try:
-        if not registrar_mensagem(MessageSid, telefone):
+        if not await registrar_mensagem(MessageSid, telefone):
             logger.info(f"Reenvio ignorado (MessageSid {MessageSid})")
             return PlainTextResponse(content=TWIML_VAZIO, media_type="application/xml")
 
-        resultado = interpretar_mensagem(mensagem)
+        resultado = await interpretar_mensagem(mensagem)
         logger.info(f"Interpretado: {resultado}")
         tipo = resultado["tipo"]
 
         if tipo == "gasto":
-            gasto_id = salvar_gasto(
+            gasto_id = await salvar_gasto(
                 resultado["descricao"], resultado["valor"],
                 resultado["categoria"], resultado.get("forma_pagamento", "não informado"), telefone
             )
             # Verifica meta da categoria
-            metas = buscar_metas(telefone)
-            gastos_mes = buscar_gastos_mes_offset(telefone, 0)
+            metas = await buscar_metas(telefone)
+            gastos_mes = await buscar_gastos_mes_offset(telefone, 0)
             por_cat = {}
             for g in gastos_mes:
                 por_cat[g["categoria"]] = por_cat.get(g["categoria"], 0) + g["valor"]
@@ -663,7 +696,7 @@ async def webhook(request: Request, Body: str = Form(...), From: str = Form(...)
             )
 
         elif tipo == "receita":
-            rec_id = salvar_receita(resultado["descricao"], resultado["valor"], resultado.get("categoria", "Outros"), telefone)
+            rec_id = await salvar_receita(resultado["descricao"], resultado["valor"], resultado.get("categoria", "Outros"), telefone)
             resposta = (
                 f"✅ *Receita registrada!* (#{rec_id})\n\n"
                 f"📌 {resultado['descricao'].capitalize()}\n"
@@ -672,54 +705,54 @@ async def webhook(request: Request, Body: str = Form(...), From: str = Form(...)
             )
 
         elif tipo == "relatorio":
-            resposta = gerar_relatorio(telefone, resultado.get("periodo", "mes"))
+            resposta = await gerar_relatorio(telefone, resultado.get("periodo", "mes"))
 
         elif tipo == "relatorio_pagamento":
-            resposta = gerar_relatorio_pagamento(telefone, resultado.get("forma", "cartão"), resultado.get("periodo", "mes"))
+            resposta = await gerar_relatorio_pagamento(telefone, resultado.get("forma", "cartão"), resultado.get("periodo", "mes"))
 
         elif tipo == "saldo":
-            resposta = gerar_saldo(telefone, resultado.get("periodo", "mes"))
+            resposta = await gerar_saldo(telefone, resultado.get("periodo", "mes"))
 
         elif tipo == "comparativo":
-            resposta = gerar_comparativo(telefone)
+            resposta = await gerar_comparativo(telefone)
 
         elif tipo == "definir_meta":
-            status = salvar_meta(telefone, resultado["categoria"], resultado["limite"])
+            status = await salvar_meta(telefone, resultado["categoria"], resultado["limite"])
             resposta = f"🎯 *Meta {status}!*\n\n{resultado['categoria']}: R$ {resultado['limite']:.2f}/mês"
 
         elif tipo == "ver_metas":
-            resposta = gerar_ver_metas(telefone)
+            resposta = await gerar_ver_metas(telefone)
 
         elif tipo == "adicionar_lembrete":
-            lembrete_id = salvar_lembrete(telefone, resultado["descricao"], resultado["valor"], resultado["dia_vencimento"])
+            lembrete_id = await salvar_lembrete(telefone, resultado["descricao"], resultado["valor"], resultado["dia_vencimento"])
             resposta = f"🔔 *Lembrete adicionado!* (#{lembrete_id})\n\n📌 {resultado['descricao'].capitalize()}\n💵 R$ {resultado['valor']:.2f}\n📅 Todo dia {resultado['dia_vencimento']}"
 
         elif tipo == "ver_lembretes":
-            resposta = gerar_ver_lembretes(telefone)
+            resposta = await gerar_ver_lembretes(telefone)
 
         elif tipo == "remover_lembrete":
-            lembrete = remover_lembrete(telefone, resultado.get("descricao", ""))
+            lembrete = await remover_lembrete(telefone, resultado.get("descricao", ""))
             resposta = f"🗑️ *Lembrete removido!*\n\n📌 {lembrete['descricao'].capitalize()}" if lembrete else "❌ Lembrete não encontrado."
 
         elif tipo == "remover_ultimo":
-            gasto = remover_ultimo_gasto(telefone)
+            gasto = await remover_ultimo_gasto(telefone)
             resposta = f"🗑️ *Gasto removido!*\n\n📌 {gasto['descricao'].capitalize()} — R$ {gasto['valor']:.2f}" if gasto else "📭 Nenhum gasto para remover."
 
         elif tipo == "remover_item":
-            gasto = remover_gasto_por_descricao(telefone, resultado.get("descricao", ""))
+            gasto = await remover_gasto_por_descricao(telefone, resultado.get("descricao", ""))
             resposta = f"🗑️ *Gasto removido!*\n\n📌 {gasto['descricao'].capitalize()} — R$ {gasto['valor']:.2f}" if gasto else "❌ Gasto não encontrado."
 
         elif tipo == "remover_categoria":
-            gasto = remover_gasto_por_categoria(telefone, resultado.get("categoria", ""), resultado.get("valor"))
+            gasto = await remover_gasto_por_categoria(telefone, resultado.get("categoria", ""), resultado.get("valor"))
             resposta = f"🗑️ *Gasto removido!*\n\n📌 {gasto['descricao'].capitalize()} — R$ {gasto['valor']:.2f} ({gasto['categoria']})" if gasto else f"❌ Nenhum gasto em {resultado.get('categoria', '')}."
 
         elif tipo == "historico":
-            resposta = gerar_historico(telefone)
+            resposta = await gerar_historico(telefone)
 
         else:
             resposta = MENSAGEM_AJUDA
 
-    except (httpx.HTTPError, anthropic.APIError) as e:
+    except (httpx.HTTPError, anthropic.APIError, asyncio.TimeoutError) as e:
         # Infraestrutura: banco fora do ar, API da Anthropic indisponível, timeout...
         logger.exception(f"Falha de infraestrutura: {e!r}")
         resposta = "⚠️ Tive um problema técnico. Tenta de novo em instantes."

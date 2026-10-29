@@ -9,7 +9,7 @@ Uma etapa por sessão, sempre em uma branch. Ao terminar uma etapa, marque aqui 
 - [x] 6.3 Async com timeouts (branch `etapa-6-3`, ver "Resultado da 6.3" abaixo; validada com a API real)
 - [x] 6.4 Corrida nas remoções (branch `etapa-6-4`, ver "Resultado da 6.4" abaixo; **falta rodar `sql/002_remover_ultimo.sql` no Supabase antes do merge**)
 - [x] 6.1 Parser determinístico antes do modelo (branch `etapa-6-1`, ver "Resultado da 6.1" abaixo; `scripts/comparar_parser.py` com a API real: zero divergências, merge liberado)
-- [ ] 6.2 Registro do tipo de intenção
+- [x] 6.2 Registro do tipo de intenção (branch `etapa-6-2`, ver "Resultado da 6.2" abaixo; **falta rodar `sql/003_intent_parsed_by.sql` no Supabase** — o código funciona sem ele)
 - [ ] 6.5 Fila no webhook
 
 Ordem sugerida: 5.1, 5.2, 6.3, 6.4, 6.1, 6.2, 6.5.
@@ -26,7 +26,7 @@ O plano abaixo foi escrito sem ver o código. A realidade do repositório:
 - Modelo atual: `claude-sonnet-4-6`. Antes de trocar para Haiku, confirme na documentação (docs.claude.com) o identificador atual (hoje `claude-haiku-5-5`) e o tamanho mínimo de prompt para cache nesse modelo. O system prompt do bot tem cerca de 1.100 tokens e pode ficar abaixo do mínimo do Haiku; nesse caso o cache não ativa. Meça `response.usage` e compare Haiku sem cache com Sonnet com cache em umas 30 mensagens reais antes de decidir.
 - Etapa 5.2: confirme na documentação atual a forma recomendada de saída estruturada, sem presumir tool use com `strict`. Não crie o schema `intent_type/entities/reply_text/action_payload`. Mantenha o formato atual (campo `tipo` mais os campos de cada intenção) como união discriminada em Pydantic, para que o `if/elif` do webhook continue igual. A resposta ao usuário continua sendo montada pelo código, não pelo modelo. O `ValidationError` do Pydantic já cai no ramo "Não entendi".
 - Etapa 6.1: o parser deve devolver o mesmo dict que `interpretar_mensagem` devolve hoje (`{"tipo": ..., ...}`), para o resto do fluxo não mudar.
-- Etapa 6.2: em vez de nova tabela, acrescente `intent_type` e `parsed_by` em `mensagens_processadas` (migração `002`) e preencha depois da interpretação.
+- Etapa 6.2: em vez de nova tabela, acrescente `intent_type` e `parsed_by` em `mensagens_processadas` (migração `003`; a `002` já é a de remoções) e preencha depois da interpretação.
 - Etapa 6.4: o helper `delete()` não verifica erro, e as remoções fazem SELECT e depois DELETE. Use `DELETE ... RETURNING` (no PostgREST, header `Prefer: return=representation`) e, para "remover último", uma função SQL (RPC) que apague e retorne a linha numa só instrução. Filtre sempre por `telefone`.
 - Etapa 6.5: responder pela API REST da Twilio exige variáveis novas na Render (`TWILIO_ACCOUNT_SID` e o número remetente do WhatsApp), que o João precisa criar. Uma fila em memória perde mensagens se o serviço reiniciar ou dormir (plano gratuito da Render), e a idempotência já marca a mensagem como processada antes de tratá-la. Decida e documente como evitar que uma mensagem se perca sem resposta.
 
@@ -145,6 +145,14 @@ O plano abaixo foi escrito sem ver o código. A realidade do repositório:
   3. Passar o valor extraído do `PayloLLMResponse.intent_type` para a camada de banco de dados.
 - **Como testar:** Enviar uma mensagem que caia no parser e outra que vá para o LLM; consultar a tabela no Supabase.
 - **Critério de pronto:** Ambas as mensagens aparecem no banco com `intent_type` preenchido corretamente e a origem (`parsed_by`) identificada.
+
+### Resultado da 6.2
+
+- `sql/003_intent_parsed_by.sql`: colunas `intent_type` e `parsed_by` (nullable; `parsed_by` só aceita `parser`/`modelo`). RLS intocado.
+- Depois da interpretação, o webhook dispara em segundo plano (`asyncio.create_task`) um PATCH por `message_sid` (`registrar_intencao`). Não atrasa a resposta; qualquer falha (inclusive coluna inexistente) só vai para o log com `logger.exception`.
+- "Não entendi" registra `intent_type='nao_entendido'` (com `parsed_by='modelo'` quando veio do modelo). Erro de infraestrutura e reenvios não registram nada.
+- A origem sai de uma `ContextVar` (`_origem`) preenchida em `interpretar_mensagem`, para o retorno continuar sendo só o dict da intenção.
+- `scripts/ver_intencoes.sql`: contagem por intent_type/parsed_by dos últimos 7 dias. Testes: `tests/test_etapa_6_2.py`.
 
 ---
 

@@ -1,3 +1,4 @@
+import contextvars
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Form, BackgroundTasks, HTTPException, Request
 from fastapi.responses import PlainTextResponse
@@ -128,6 +129,37 @@ async def registrar_mensagem(message_sid, telefone):
         return False
     r.raise_for_status()
     return True
+
+# Quem interpretou a mensagem atual ('parser' ou 'modelo'). Fica fora do retorno de
+# `interpretar_mensagem` para o resto do fluxo continuar recebendo só o dict da intenção.
+_origem = contextvars.ContextVar("origem_interpretacao", default=None)
+_tarefas_intencao = set()
+
+async def registrar_intencao(message_sid, intent_type, parsed_by):
+    """Anota o tipo de intenção na linha da mensagem. Nunca levanta: é só métrica."""
+    try:
+        dados = {"intent_type": intent_type}
+        if parsed_by:
+            dados["parsed_by"] = parsed_by
+        r = await asyncio.wait_for(
+            db().patch(
+                f"{SUPABASE_API}/mensagens_processadas",
+                headers={**HEADERS, "Prefer": "return=minimal"},
+                params={"message_sid": f"eq.{message_sid}"},
+                json=dados,
+            ),
+            TEMPO_MAX_SUPABASE,
+        )
+        r.raise_for_status()
+    except Exception:
+        # Ex.: coluna ainda não criada (sql/003 não rodado). A resposta ao usuário não depende disso.
+        logger.exception("Não consegui registrar intent_type/parsed_by (segue o fluxo)")
+
+async def agendar_registro_intencao(message_sid, intent_type, parsed_by):
+    """Dispara o registro em segundo plano, sem atrasar a resposta ao usuário."""
+    tarefa = asyncio.create_task(registrar_intencao(message_sid, intent_type, parsed_by))
+    _tarefas_intencao.add(tarefa)  # referência forte, senão a tarefa pode ser coletada no meio
+    tarefa.add_done_callback(_tarefas_intencao.discard)
 
 def filtro_mes(hoje, offset=0):
     """Retorna o prefixo YYYY-MM para o mês atual ou anterior."""
@@ -473,8 +505,10 @@ def parse_deterministico(texto):
 async def interpretar_mensagem(mensagem):
     resultado = parse_deterministico(mensagem)
     if resultado is not None:
+        _origem.set("parser")
         logger.info("Interpretação: caminho=parser")
         return resultado
+    _origem.set("modelo")
     logger.info("Interpretação: caminho=modelo")
     return await interpretar_com_modelo(mensagem)
 
@@ -716,6 +750,8 @@ async def webhook(request: Request, Body: str = Form(...), From: str = Form(...)
     telefone = From
     logger.info(f"Mensagem de {telefone}: {mensagem}")
 
+    intencao_registrada = False
+    _origem.set(None)
     try:
         if not await registrar_mensagem(MessageSid, telefone):
             logger.info(f"Reenvio ignorado (MessageSid {MessageSid})")
@@ -724,6 +760,8 @@ async def webhook(request: Request, Body: str = Form(...), From: str = Form(...)
         resultado = await interpretar_mensagem(mensagem)
         logger.info(f"Interpretado: {resultado}")
         tipo = resultado["tipo"]
+        await agendar_registro_intencao(MessageSid, tipo, _origem.get())
+        intencao_registrada = True
 
         if tipo == "gasto":
             gasto_id = await salvar_gasto(
@@ -819,6 +857,8 @@ async def webhook(request: Request, Body: str = Form(...), From: str = Form(...)
     except (ErroInterpretacao, KeyError, TypeError, ValueError) as e:
         # Interpretação: o modelo devolveu algo inválido ou incompleto
         logger.exception(f"Falha de interpretação: {e!r}")
+        if not intencao_registrada:
+            await agendar_registro_intencao(MessageSid, "nao_entendido", _origem.get())
         resposta = "⚠️ Não entendi sua mensagem.\n\nMande 'ajuda' para ver os comandos disponíveis."
 
     except Exception as e:
